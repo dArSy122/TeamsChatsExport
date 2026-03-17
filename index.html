@@ -1,0 +1,627 @@
+<!doctype html>
+<html lang="bg">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Teams Chat Export Portal</title>
+
+<style>
+:root{
+  --bg:#0a1020;
+  --panel:rgba(15,23,42,.78);
+  --line:rgba(255,255,255,.08);
+  --line2:rgba(255,255,255,.14);
+  --text:#e5e7eb;
+  --muted:#94a3b8;
+  --soft:#cbd5e1;
+  --accent:#7c3aed;
+  --accent2:#2563eb;
+  --success:#22c55e;
+  --warn:#f59e0b;
+  --danger:#ef4444;
+  --chip:rgba(255,255,255,.05);
+  --shadow:0 20px 50px rgba(0,0,0,.35);
+  --radius:18px;
+  --max:1240px;
+}
+
+*{box-sizing:border-box}
+
+html,body{
+  margin:0;
+  min-height:100%;
+  font-family:Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif;
+  color:var(--text);
+  background:
+    radial-gradient(1000px 700px at 10% -10%, rgba(124,58,237,.28), transparent 60%),
+    radial-gradient(900px 700px at 90% -10%, rgba(37,99,235,.22), transparent 60%),
+    linear-gradient(180deg, #0a1020 0%, #09111d 100%);
+}
+
+body{
+  padding:24px;
+}
+
+.appShell{
+  max-width:var(--max);
+  margin:0 auto;
+}
+
+.hidden{
+  display:none !important;
+}
+
+.card{
+  background:var(--panel);
+  border:1px solid var(--line);
+  border-radius:var(--radius);
+  box-shadow:var(--shadow);
+  backdrop-filter:blur(10px);
+}
+
+.pill{
+  display:inline-flex;
+  align-items:center;
+  gap:8px;
+  padding:6px 12px;
+  border-radius:999px;
+  background:var(--chip);
+  border:1px solid var(--line);
+  color:var(--soft);
+  font-size:12px;
+  font-weight:800;
+  line-height:1;
+  white-space:nowrap;
+}
+
+.btn{
+  appearance:none;
+  border:none;
+  outline:none;
+  cursor:pointer;
+  color:var(--text);
+  background:rgba(255,255,255,.05);
+  border:1px solid var(--line2);
+  border-radius:14px;
+  padding:12px 16px;
+  font-size:14px;
+  font-weight:900;
+  transition:.18s ease;
+}
+
+.btn:hover{
+  transform:translateY(-1px);
+  background:rgba(255,255,255,.08);
+}
+
+.btn:disabled{
+  opacity:.5;
+  cursor:not-allowed;
+  transform:none;
+}
+
+.btnPrimary{
+  background:linear-gradient(135deg, var(--accent), var(--accent2));
+  border-color:transparent;
+}
+
+.btnPrimary:hover{
+  background:linear-gradient(135deg, var(--accent), var(--accent2));
+  filter:brightness(1.05);
+}
+
+.btnDanger{
+  background:rgba(239,68,68,.12);
+  border-color:rgba(239,68,68,.28);
+}
+
+.input{
+  width:100%;
+  border-radius:14px;
+  border:1px solid var(--line2);
+  background:rgba(255,255,255,.04);
+  color:var(--text);
+  padding:12px 14px;
+  font-size:14px;
+  outline:none;
+}
+
+.input::placeholder{
+  color:var(--muted);
+}
+
+.sectionTitle{
+  font-size:18px;
+  font-weight:1000;
+  margin:0;
+  line-height:1.2;
+}
+
+.sectionDesc{
+  color:var(--muted);
+  font-size:13px;
+  line-height:1.55;
+  margin:8px 0 0 0;
+}
+
+.loginWrap{
+  min-height:calc(100vh - 48px);
+  display:flex;
+  align-items:center;
+  justify-content:center;
+}
+
+.loginBox{
+  width:min(460px, 100%);
+  padding:48px 36px;
+  display:flex;
+  justify-content:center;
+}
+
+.loginInner{
+  display:flex;
+  flex-direction:column;
+  align-items:center;
+  text-align:center;
+  gap:18px;
+}
+
+.loginTitle{
+  margin:0;
+  font-size:34px;
+  font-weight:1000;
+  letter-spacing:-0.02em;
+  line-height:1.08;
+}
+
+.loginText{
+  margin:0;
+  font-size:14px;
+  color:var(--muted);
+  max-width:36ch;
+  line-height:1.6;
+}
+
+.loginBtn{
+  margin-top:8px;
+  width:220px;
+  font-size:15px;
+}
+
+.appView{
+  display:grid;
+  gap:18px;
+}
+
+.topbar{
+  display:flex;
+  justify-content:space-between;
+  align-items:flex-start;
+  gap:16px;
+  padding:20px 22px;
+}
+
+.brandTitle{
+  margin:0;
+  font-size:24px;
+  font-weight:1000;
+  letter-spacing:-0.02em;
+  line-height:1.1;
+}
+
+.brandSub{
+  margin:8px 0 0 0;
+  color:var(--muted);
+  font-size:13px;
+  line-height:1.5;
+}
+
+.topbarRight{
+  display:flex;
+  gap:10px;
+  align-items:center;
+  flex-wrap:wrap;
+  justify-content:flex-end;
+}
+
+.stepsRow{
+  display:grid;
+  grid-template-columns:repeat(4, minmax(0, 1fr));
+  gap:14px;
+}
+
+.stepCard{
+  position:relative;
+  min-height:120px;
+  padding:18px 22px 18px 18px;
+  border-radius:18px;
+  background:rgba(255,255,255,.035);
+  border:1px solid var(--line);
+  overflow:visible;
+}
+
+.stepCard::after{
+  content:"";
+  position:absolute;
+  top:50%;
+  right:-18px;
+  transform:translateY(-50%);
+  width:0;
+  height:0;
+  border-top:18px solid transparent;
+  border-bottom:18px solid transparent;
+  border-left:18px solid rgba(255,255,255,.10);
+}
+
+.stepCard:last-child::after{
+  display:none;
+}
+
+.stepNo{
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  width:30px;
+  height:30px;
+  border-radius:10px;
+  background:rgba(255,255,255,.08);
+  font-size:12px;
+  font-weight:1000;
+  margin-bottom:12px;
+}
+
+.stepTitle{
+  margin:0;
+  font-size:15px;
+  font-weight:1000;
+  line-height:1.2;
+}
+
+.stepText{
+  margin:8px 0 0 0;
+  color:var(--muted);
+  font-size:13px;
+  line-height:1.55;
+}
+
+.actionBar{
+  display:flex;
+  justify-content:space-between;
+  align-items:center;
+  gap:16px;
+  padding:18px;
+  flex-wrap:wrap;
+}
+
+.actionBarLeft h2{
+  margin:0;
+  font-size:18px;
+  font-weight:1000;
+}
+
+.actionBarLeft p{
+  margin:8px 0 0 0;
+  color:var(--muted);
+  font-size:13px;
+}
+
+.actionBarButtons{
+  display:flex;
+  gap:10px;
+  flex-wrap:wrap;
+}
+
+.chatPanel{
+  display:flex;
+  flex-direction:column;
+}
+
+.panelHeader{
+  padding:18px 18px 12px 18px;
+  border-bottom:1px solid var(--line);
+}
+
+.panelBody{
+  padding:16px 18px 18px 18px;
+}
+
+.chatStats{
+  display:flex;
+  gap:24px;
+  flex-wrap:wrap;
+  margin-bottom:14px;
+}
+
+.chatStat{
+  display:flex;
+  flex-direction:column;
+  gap:4px;
+}
+
+.chatStatLabel{
+  color:var(--muted);
+  font-size:12px;
+  font-weight:800;
+  text-transform:uppercase;
+  letter-spacing:.04em;
+}
+
+.chatStatValue{
+  font-size:20px;
+  font-weight:1000;
+  line-height:1;
+}
+
+.toolbar{
+  display:flex;
+  gap:10px;
+  align-items:center;
+  margin-bottom:14px;
+}
+
+.chatList{
+  display:grid;
+  gap:10px;
+  max-height:calc(100vh - 360px);
+  overflow:auto;
+  padding-right:4px;
+}
+
+.chatItem{
+  display:flex;
+  align-items:flex-start;
+  justify-content:space-between;
+  gap:14px;
+  padding:14px 16px;
+  border:1px solid rgba(255,255,255,.08);
+  border-radius:16px;
+  background:rgba(255,255,255,.03);
+  cursor:pointer;
+  transition:.16s ease;
+}
+
+.chatItem:hover{
+  background:rgba(255,255,255,.05);
+}
+
+.chatItemLeft{
+  display:flex;
+  align-items:flex-start;
+  gap:12px;
+  min-width:0;
+  flex:1;
+}
+
+.chatCheckWrap{
+  padding-top:2px;
+  flex:0 0 auto;
+}
+
+.chatCheckbox{
+  width:18px;
+  height:18px;
+  accent-color:#7c3aed;
+  cursor:pointer;
+}
+
+.chatMain{
+  min-width:0;
+  flex:1;
+}
+
+.chatTitle{
+  font-size:14px;
+  font-weight:900;
+  line-height:1.35;
+  word-break:break-word;
+}
+
+.chatMeta{
+  margin-top:5px;
+  color:var(--muted);
+  font-size:12px;
+  line-height:1.5;
+  word-break:break-word;
+}
+
+.chatError{
+  margin-top:6px;
+  font-size:12px;
+  color:#fecaca;
+  line-height:1.45;
+}
+
+.chatErrorMeta{
+  margin-top:2px;
+  font-size:11px;
+  color:#fca5a5;
+}
+
+.chatRight{
+  display:flex;
+  align-items:center;
+  gap:10px;
+  flex:0 0 auto;
+}
+
+.statusBadge{
+  font-size:12px;
+  font-weight:800;
+  padding:5px 9px;
+  border-radius:999px;
+  border:1px solid rgba(255,255,255,.10);
+  background:rgba(255,255,255,.06);
+}
+
+.queueStatus{
+  margin:8px 0 12px 0;
+  padding:10px 14px;
+  border-radius:12px;
+  font-size:13px;
+  font-weight:700;
+  background:rgba(124,58,237,.12);
+  border:1px solid rgba(124,58,237,.35);
+  color:#e9d5ff;
+}
+
+@media (max-width: 1080px){
+  .stepsRow{
+    grid-template-columns:1fr 1fr;
+  }
+
+  .stepCard::after{
+    display:none;
+  }
+
+  .chatList{
+    max-height:none;
+  }
+}
+
+@media (max-width: 720px){
+  body{
+    padding:14px;
+  }
+
+  .topbar{
+    padding:16px;
+  }
+
+  .stepsRow{
+    grid-template-columns:1fr;
+  }
+
+  .loginBox{
+    padding:36px 22px;
+  }
+
+  .loginTitle{
+    font-size:28px;
+  }
+
+  .chatStats{
+    gap:16px;
+  }
+
+  .chatStatValue{
+    font-size:18px;
+  }
+}
+</style>
+</head>
+<body>
+  <div class="appShell">
+
+    <section id="loginView" class="loginWrap">
+      <div class="card loginBox">
+        <div class="loginInner">
+          <span class="pill">Microsoft Teams</span>
+          <h1 class="loginTitle">Teams Chat Export Portal</h1>
+          <p class="loginText">
+            Secure internal portal for exporting Microsoft Teams chats into fully offline HTML archives.
+          </p>
+          <button id="btnLogin" class="btn btnPrimary loginBtn">Sign in with Microsoft</button>
+        </div>
+      </div>
+    </section>
+
+    <section id="appView" class="appView hidden">
+      <header class="card topbar">
+        <div>
+          <h1 class="brandTitle">Teams Chat Export Portal</h1>
+          <p class="brandSub">
+            Избор и експорт на Teams чатове в единични HTML архиви за локално използване.
+          </p>
+        </div>
+
+        <div class="topbarRight">
+          <span id="mePill" class="pill">Not signed in</span>
+        </div>
+      </header>
+
+      <section class="stepsRow">
+        <div class="card stepCard">
+          <div class="stepNo">1</div>
+          <h3 class="stepTitle">Влез в портала</h3>
+          <p class="stepText">
+            Използвай Microsoft акаунта си, за да се отвори достъп до наличните за теб Teams чатове.
+          </p>
+        </div>
+
+        <div class="card stepCard">
+          <div class="stepNo">2</div>
+          <h3 class="stepTitle">Зареди чатовете</h3>
+          <p class="stepText">
+            Натисни Load chats, за да се изтегли пълният списък с достъпните 1:1 и групови чатове.
+          </p>
+        </div>
+
+        <div class="card stepCard">
+          <div class="stepNo">3</div>
+          <h3 class="stepTitle">Избери какво да архивираш</h3>
+          <p class="stepText">
+            Маркирай един, няколко или всички чатове, които искаш да включиш в export queue.
+          </p>
+        </div>
+
+        <div class="card stepCard">
+          <div class="stepNo">4</div>
+          <h3 class="stepTitle">Стартирай експорт</h3>
+          <p class="stepText">
+            Пусни Export selected, Queue all или Retry failed only според текущия статус на списъка.
+          </p>
+        </div>
+      </section>
+
+      <section class="card actionBar">
+        <div class="actionBarLeft">
+          <h2>Основни действия</h2>
+          <p>Използвай действията вдясно, за да заредиш списъка и да стартираш export queue.</p>
+        </div>
+
+        <div class="actionBarButtons">
+          <button id="btnChats" class="btn">Load chats</button>
+          <button id="btnExport" class="btn btnPrimary">Export selected</button>
+        </div>
+      </section>
+
+      <section class="card chatPanel">
+        <div class="panelHeader">
+          <h2 class="sectionTitle">Chat selection</h2>
+          <p class="sectionDesc">
+            Избери чатове от списъка, филтрирай по заглавие и следи статуса на queue обработката.
+          </p>
+        </div>
+
+        <div class="panelBody">
+          <div class="chatStats">
+            <div class="chatStat">
+              <div class="chatStatLabel">Общо чатове</div>
+              <div id="countStat" class="chatStatValue">0</div>
+            </div>
+
+            <div class="chatStat">
+              <div class="chatStatLabel">Избрани</div>
+              <div id="selectedStat" class="chatStatValue">0</div>
+            </div>
+          </div>
+
+          <div class="toolbar">
+            <input
+              id="q"
+              class="input"
+              type="text"
+              placeholder="Search by topic, participants or visible title..."
+            />
+          </div>
+          <div id="queueStatus" class="queueStatus hidden"></div>
+
+          <div id="chatList" class="chatList"></div>
+        </div>
+      </section>
+    </section>
+  </div>
+
+  <script type="module" src="/src/main.js"></script>
+</body>
+</html>
