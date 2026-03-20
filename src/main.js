@@ -6,10 +6,32 @@ import * as msal from "@azure/msal-browser";
 /** =========================
  * CONFIG
  * ========================= */
-const TENANT_ID = "2c51b27f-3900-46f3-b208-a8b66df531e3";
-const CLIENT_ID = "77934d56-04dd-4faf-b26b-d97275751bf8";
+const TENANT_ID = String(import.meta.env.VITE_TENANT_ID || "").trim();
+const CLIENT_ID = String(import.meta.env.VITE_CLIENT_ID || "").trim();
 const REDIRECT_URI = window.location.origin + "/";
 const GRAPH_BASE = "https://graph.microsoft.com/v1.0";
+
+function assertRequiredConfig() {
+  const missing = [];
+
+  if (!TENANT_ID) missing.push("VITE_TENANT_ID");
+  if (!CLIENT_ID) missing.push("VITE_CLIENT_ID");
+
+  if (!missing.length) return;
+
+  const msg =
+    `Missing required Vite environment variables: ${missing.join(", ")}.\n` +
+    `Create/update the .env file in the project root and restart the Vite dev server.`;
+
+  console.error("[CONFIG]", {
+    TENANT_ID,
+    CLIENT_ID,
+    missing,
+    redirectUri: REDIRECT_URI,
+  });
+
+  throw new Error(msg);
+}
 
 /** =========================
  * SESSION POLICY
@@ -64,6 +86,8 @@ const SCOPES = [
 /** =========================
  * MSAL
  * ========================= */
+assertRequiredConfig();
+
 const msalInstance = new msal.PublicClientApplication({
   auth: {
     clientId: CLIENT_ID,
@@ -207,6 +231,11 @@ let _sessionWatchHandle = null;
 let _sessionReauthInProgress = false;
 let _authInited = false;
 let _uiEventsBound = false;
+let _authInitPromise = null;
+
+let _exportDirectoryHandle = null;
+let _currentBatchFolderHandle = null;
+let _currentBatchFolderName = "";
 
 /** =========================
  * HELPERS
@@ -230,6 +259,234 @@ function formatShortDateTime(value) {
   return formatDDMMYYYY_HHMMSS(d);
 }
 
+function getMemberBestLabel(member) {
+  const raw =
+    String(
+      member?.displayName ||
+      member?.user?.displayName ||
+      member?.email ||
+      member?.user?.email ||
+      member?.userPrincipalName ||
+      member?.upn ||
+      member?.user?.userPrincipalName ||
+      member?.id ||
+      member?.userId ||
+      ""
+    ).trim();
+
+  if (!raw) return "";
+
+  // If it is an email/UPN, keep only the local readable part when possible
+  const emailMatch = raw.match(/^([^@]+)@/);
+  if (emailMatch && emailMatch[1]) {
+    const local = emailMatch[1]
+      .replace(/[._-]+/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+
+    if (local) {
+      return local
+        .split(" ")
+        .filter(Boolean)
+        .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+        .join(" ");
+    }
+  }
+
+  return raw;
+}
+
+function getMemberIdentityStrings(member) {
+  return [
+    member?.displayName,
+    member?.user?.displayName,
+    member?.email,
+    member?.user?.email,
+    member?.userPrincipalName,
+    member?.upn,
+    member?.user?.userPrincipalName,
+    member?.id,
+    member?.userId,
+    member?.user?.id,
+  ]
+    .map((x) => String(x || "").trim())
+    .filter(Boolean);
+}
+
+function isSamePersonLike(member, me) {
+  const memberKeys = buildIdentityKeySet(getMemberIdentityStrings(member));
+  const myKeys = buildIdentityKeySet([
+    me?.id,
+    me?.displayName,
+    me?.userPrincipalName,
+    me?.mail,
+  ].filter(Boolean));
+
+  if (!memberKeys.size || !myKeys.size) return false;
+
+  for (const k of memberKeys) {
+    if (myKeys.has(k)) return true;
+  }
+
+  return false;
+}
+
+function removeQueuedItemsThatNeverStarted() {
+  _queueItems = _queueItems.filter((item) => item.status !== "queued");
+}
+
+function buildAttachmentFailureMap(stats) {
+  const map = new Map();
+  const list = Array.isArray(stats?.failures) ? stats.failures : [];
+
+  for (const item of list) {
+    if (!item?.token) continue;
+    map.set(item.token, item);
+  }
+
+  return map;
+}
+
+function getDeletedNoticeAuthorLabel(sender) {
+  const s = String(sender || "").trim();
+  if (!s || s.toLowerCase() === "unknown") return "A participant";
+  return s;
+}
+
+function getMessageMinuteKey(dtMs, dtStr = "") {
+  if (Number.isFinite(dtMs) && dtMs > 0) {
+    const d = new Date(dtMs);
+    return [
+      d.getFullYear(),
+      pad2(d.getMonth() + 1),
+      pad2(d.getDate()),
+      pad2(d.getHours()),
+      pad2(d.getMinutes()),
+    ].join("-");
+  }
+
+  const raw = String(dtStr || "").trim();
+  if (!raw) return "";
+
+  const m = raw.match(/^(\d{2})\/(\d{2})\/(\d{4}) (\d{2}):(\d{2})/);
+  if (!m) return raw;
+
+  const [, dd, mm, yyyy, hh, mi] = m;
+  return `${yyyy}-${mm}-${dd}-${hh}-${mi}`;
+}
+
+function getOtherParticipantLabelForOneOnOne(members, me) {
+  const list = Array.isArray(members) ? members : [];
+  if (!list.length) return "";
+
+  const others = list.filter((m) => !isSamePersonLike(m, me));
+
+  const candidates = (others.length ? others : list)
+    .map((m) => getMemberBestLabel(m))
+    .filter(Boolean);
+
+  // Remove my display name as plain-text fallback as well
+  const myName = String(me?.displayName || "").trim().toLowerCase();
+  const filtered = candidates.filter((name) => !myName || name.toLowerCase() !== myName);
+
+  return filtered[0] || candidates[0] || "";
+}
+
+function computeAttachmentsTotalSizeBytes(atts) {
+  const list = Array.isArray(atts) ? atts : [];
+  let total = 0;
+
+  for (const a of list) {
+    if (!a) continue;
+
+    // 1. Direct size от Graph
+    if (typeof a.size === "number" && a.size > 0) {
+      total += a.size;
+      continue;
+    }
+
+    // 2. Embedded contentBytes fallback
+    if (typeof a.contentBytes === "string") {
+      // base64 length → приблизителен размер
+      const len = a.contentBytes.length;
+      total += Math.floor((len * 3) / 4);
+      continue;
+    }
+  }
+
+  return total;
+}
+
+function isDeletedMessage(msg, bodyHtml = "") {
+  if (msg?.deletedDateTime) return true;
+
+  const mt = String(msg?.messageType || "").trim().toLowerCase();
+  if (mt.includes("deleted")) return true;
+
+  const text = extractPlainTextFromHtml(bodyHtml).toLowerCase();
+
+  if (
+    text === "this message has been deleted." ||
+    text === "this message has been deleted" ||
+    text === "message deleted" ||
+    text === "съобщението е изтрито" ||
+    text === "това съобщение е изтрито"
+  ) {
+    return true;
+  }
+
+  return false;
+}
+
+function confirmLargeFileEmbed(fileName, sizeBytes, reason) {
+  const sizeLabel = formatBytesHuman(sizeBytes);
+
+  const msg =
+    `Файл: ${fileName}\nРазмер: ${sizeLabel}\n\n` +
+    (reason === "total_limit"
+      ? "Този файл ще надвиши общия размер на архива."
+      : "Файлът е прекалено голям за безопасно вграждане.") +
+    "\n\nТова може да направи HTML архива бавен или нестабилен.\n\n" +
+    "Искаш ли все пак да бъде вграден?";
+
+  return window.confirm(msg);
+}
+
+function formatBytesHuman(bytes) {
+  const n = Number(bytes || 0);
+  if (!Number.isFinite(n) || n <= 0) return "0 B";
+
+  const gb = 1024 * 1024 * 1024;
+  const mb = 1024 * 1024;
+  const kb = 1024;
+
+  if (n >= gb) return `${(n / gb).toFixed(2)} GB`;
+  if (n >= mb) return `${(n / mb).toFixed(2)} MB`;
+  if (n >= kb) return `${(n / kb).toFixed(2)} KB`;
+  return `${n} B`;
+}
+
+function base64ToBlob(base64, mime = "application/octet-stream") {
+  const clean = String(base64 || "").trim();
+  if (!clean) throw new Error("base64_empty");
+
+  const byteChars = atob(clean);
+  const byteNumbers = new Array(byteChars.length);
+
+  for (let i = 0; i < byteChars.length; i++) {
+    byteNumbers[i] = byteChars.charCodeAt(i);
+  }
+
+  const byteArray = new Uint8Array(byteNumbers);
+  return new Blob([byteArray], { type: mime });
+}
+
+function formatBytesToMB(bytes) {
+  if (!bytes || bytes <= 0) return "";
+  const mb = bytes / (1024 * 1024);
+  return `${mb.toFixed(2)} MB`;
+}
+
 function getChatStartedLabel(chat) {
   return formatShortDateTime(chat?.createdDateTime);
 }
@@ -250,6 +507,123 @@ function esc(s) {
 function safeFileName(name) {
   const n = String(name || "").trim() || "Teams_Chat_Archive";
   return n.replace(/[\/\\:*?"<>|]/g, "_").replace(/\s+/g, " ").trim();
+}
+
+function formatFileTimestampYYYYMMDDHHMMSS(value = new Date()) {
+  const d = value instanceof Date ? value : new Date(value);
+  if (isNaN(d.getTime())) return "00000000000000";
+
+  return [
+    d.getFullYear(),
+    pad2(d.getMonth() + 1),
+    pad2(d.getDate()),
+    pad2(d.getHours()),
+    pad2(d.getMinutes()),
+    pad2(d.getSeconds()),
+  ].join("");
+}
+
+function trimFileBasePreserveWords(value, maxLen = 140) {
+  const s = String(value || "").trim();
+  if (!s) return "Chat";
+
+  if (s.length <= maxLen) return s;
+
+  let cut = s.slice(0, maxLen).trim();
+
+  const lastSpace = cut.lastIndexOf(" ");
+  if (lastSpace >= 24) {
+    cut = cut.slice(0, lastSpace).trim();
+  }
+
+  return cut.replace(/[._\-\s]+$/g, "").trim() || "Chat";
+}
+
+function getParticipantInitials(displayName) {
+  const parts = String(displayName || "")
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean);
+
+  if (!parts.length) return "?";
+
+  const first = parts[0]?.[0] || "";
+  const last = parts.length > 1 ? (parts[parts.length - 1]?.[0] || "") : "";
+
+  return (first + last).toUpperCase() || "?";
+}
+
+function getGroupChatFallbackTitleFromMembers(members) {
+  const list = Array.isArray(members) ? members : [];
+
+  const uniqueNames = [];
+  const seen = new Set();
+
+  for (const member of list) {
+    const name = String(
+      member?.displayName ||
+      member?.user?.displayName ||
+      member?.email ||
+      member?.user?.email ||
+      member?.userPrincipalName ||
+      ""
+    ).trim();
+
+    if (!name) continue;
+
+    const key = name.toLowerCase();
+    if (seen.has(key)) continue;
+
+    seen.add(key);
+    uniqueNames.push(name);
+  }
+
+  if (!uniqueNames.length) return "Group Chat";
+
+  const initials = uniqueNames.map(getParticipantInitials).filter(Boolean);
+  return `Group Chat(${initials.join(", ")})`;
+}
+
+function isUnnamedGroupChat(chat) {
+  const topic = String(chat?.topic || "").trim();
+  return !topic || topic.toLowerCase() === "group chat";
+}
+
+function buildExportFileBase(chat, me, members) {
+  const chatType = String(chat?.chatType || "").toLowerCase();
+  const topic = String(chat?.topic || "").trim();
+
+  if (chatType === "oneonone") {
+    const otherLabel = getOtherParticipantLabelForOneOnOne(members, me);
+    if (otherLabel) return otherLabel;
+
+    if (topic) return topic;
+
+    return "Former Participant";
+  }
+
+  if (chatType === "group" || chatType === "meeting") {
+    if (!isUnnamedGroupChat(chat)) {
+      return topic;
+    }
+
+    return getGroupChatFallbackTitleFromMembers(members);
+  }
+
+  return chatDisplayName(chat, members) || "Chat";
+}
+
+function buildExportFileName(chat, me, members) {
+  const prefix = "Teams_Chat_Export_";
+  const base = buildExportFileBase(chat, me, members);
+  const ts = formatFileTimestampYYYYMMDDHHMMSS(new Date());
+
+  // Reserve space for prefix + "_" + timestamp + ".html"
+  const maxBaseLen = 140;
+  const trimmedBase = trimFileBasePreserveWords(base, maxBaseLen);
+  const safeBase = safeFileName(trimmedBase);
+
+  return `${prefix}${safeBase}_${ts}.html`;
 }
 
 function makeUniqueFileName(desiredName, usedSet) {
@@ -278,6 +652,16 @@ function normalizeErrorMessage(errorLike) {
   if (!errorLike) return "Unknown error";
   if (typeof errorLike === "string") return errorLike;
   return errorLike?.message || String(errorLike) || "Unknown error";
+}
+
+function isMsalNoTokenRequestCacheError(errorLike) {
+  const msg = normalizeErrorMessage(errorLike).toLowerCase();
+  return msg.includes("no_token_request_cache_error");
+}
+
+function isMsalInteractionInProgressError(errorLike) {
+  const msg = normalizeErrorMessage(errorLike).toLowerCase();
+  return msg.includes("interaction_in_progress");
 }
 
 function stripToPreviewText(html, maxLen = 240) {
@@ -313,6 +697,66 @@ function normalizeTeamsHtml(html) {
 
 function normalizeId(value) {
   return String(value || "").trim().toLowerCase();
+}
+
+function isGuidLike(value) {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(String(value || "").trim());
+}
+
+function extractCanonicalIdentityKeys(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return [];
+
+  const out = new Set();
+  const lower = raw.toLowerCase();
+
+  out.add(lower);
+
+  // Common URI-like wrappers
+  if (lower.startsWith("mailto:")) out.add(lower.slice("mailto:".length));
+  if (lower.startsWith("sip:")) out.add(lower.slice("sip:".length));
+
+  // Common Teams / Graph identity prefixes
+  const knownPrefixes = [
+    "8:orgid:",
+    "orgid:",
+    "8:teamsvisitor:",
+    "8:skypeid:",
+    "skypeid:",
+    "8:",
+  ];
+
+  for (const prefix of knownPrefixes) {
+    if (lower.startsWith(prefix)) {
+      out.add(lower.slice(prefix.length));
+    }
+  }
+
+  // Extract GUID anywhere inside the identifier
+  const guidMatch = lower.match(/[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}/i);
+  if (guidMatch) {
+    out.add(guidMatch[0].toLowerCase());
+  }
+
+  // Extract email if present anywhere
+  const emailMatch = lower.match(/[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}/i);
+  if (emailMatch) {
+    out.add(emailMatch[0].toLowerCase());
+  }
+
+  return [...out].filter(Boolean);
+}
+
+function buildIdentityKeySet(values) {
+  const set = new Set();
+
+  for (const value of Array.isArray(values) ? values : [values]) {
+    for (const k of extractCanonicalIdentityKeys(value)) {
+      set.add(k);
+    }
+  }
+
+  return set;
 }
 
 function collectMemberCandidateIds(member) {
@@ -380,27 +824,31 @@ function getReactionVisual(reactionType) {
 }
 
 function resolveUserDisplayNameById(userId, members, me) {
-  const uid = normalizeId(userId);
-  if (!uid) return "";
+  const targetKeys = buildIdentityKeySet(userId);
+  if (!targetKeys.size) return "";
 
-  const myIds = [
+  const myValues = [
     me?.id,
     me?.userPrincipalName,
     me?.mail,
-  ]
-    .map((x) => normalizeId(x))
-    .filter(Boolean);
+  ].filter(Boolean);
 
-  if (myIds.includes(uid)) {
-    return me?.displayName || me?.userPrincipalName || "";
+  const myKeys = buildIdentityKeySet(myValues);
+
+  for (const k of targetKeys) {
+    if (myKeys.has(k)) {
+      return me?.displayName || me?.userPrincipalName || "";
+    }
   }
 
   const hit = (members || []).find((m) => {
-    const ids = collectMemberCandidateIds(m)
-      .map((x) => normalizeId(x))
-      .filter(Boolean);
+    const ids = collectMemberCandidateIds(m);
+    const memberKeys = buildIdentityKeySet(ids);
 
-    return ids.includes(uid);
+    for (const k of targetKeys) {
+      if (memberKeys.has(k)) return true;
+    }
+    return false;
   });
 
   return (
@@ -412,20 +860,77 @@ function resolveUserDisplayNameById(userId, members, me) {
   );
 }
 
+function extractReactionActor(reaction) {
+  const root = reaction?.user || {};
+  const nestedUser = root?.user || {};
+
+  const displayName =
+    String(
+      root?.displayName ||
+      nestedUser?.displayName ||
+      ""
+    ).trim();
+
+  const id =
+    String(
+      root?.id ||
+      nestedUser?.id ||
+      reaction?.userId ||
+      ""
+    ).trim();
+
+  const email =
+    String(
+      root?.email ||
+      nestedUser?.email ||
+      root?.userPrincipalName ||
+      nestedUser?.userPrincipalName ||
+      ""
+    ).trim();
+
+  return {
+    displayName,
+    id,
+    email,
+  };
+}
+
 function resolveReactionUserDisplayName(reaction, members, me) {
-  const directName = String(reaction?.user?.displayName || "").trim();
-  if (directName) return directName;
+  const actor = extractReactionActor(reaction);
 
-  const userId =
-    reaction?.user?.id ||
-    reaction?.userId ||
-    "";
+  if (actor.displayName) {
+    return actor.displayName;
+  }
 
-  const resolved = resolveUserDisplayNameById(userId, members, me);
-  if (resolved) return resolved;
+  const actorIdentityCandidates = [
+    actor.id,
+    actor.email,
+    reaction?.userId,
+    reaction?.user?.user?.id,
+    reaction?.user?.id,
+    reaction?.user?.user?.email,
+    reaction?.user?.email,
+    reaction?.user?.user?.userPrincipalName,
+    reaction?.user?.userPrincipalName,
+  ].filter(Boolean);
 
-  if (me?.id && normalizeId(me.id) === normalizeId(userId)) {
-    return me.displayName || me.userPrincipalName || "";
+  for (const candidate of actorIdentityCandidates) {
+    const resolved = resolveUserDisplayNameById(candidate, members, me);
+    if (resolved) return resolved;
+  }
+
+  const myKeys = buildIdentityKeySet([
+    me?.id,
+    me?.userPrincipalName,
+    me?.mail,
+  ]);
+
+  const actorKeys = buildIdentityKeySet(actorIdentityCandidates);
+
+  for (const k of actorKeys) {
+    if (myKeys.has(k)) {
+      return me?.displayName || me?.userPrincipalName || "";
+    }
   }
 
   return "";
@@ -802,28 +1307,65 @@ function armSessionWatcher() {
  * MSAL AUTH
  * ========================= */
 async function initAuth() {
-  if (_authInited) return msalInstance.getActiveAccount() || null;
-
-  await msalInstance.initialize();
-  loadAppSessionMeta();
-
-  const resp = await msalInstance.handleRedirectPromise();
-  if (resp?.account) {
-    msalInstance.setActiveAccount(resp.account);
-    recordAuthenticatedSession({ reset: true });
+  if (_authInited) {
+    return msalInstance.getActiveAccount() || msalInstance.getAllAccounts()[0] || null;
   }
 
-  const acc = msalInstance.getActiveAccount() || msalInstance.getAllAccounts()[0];
-  if (acc) msalInstance.setActiveAccount(acc);
+  if (_authInitPromise) {
+    return await _authInitPromise;
+  }
 
-  _authInited = true;
-  return msalInstance.getActiveAccount() || null;
+  _authInitPromise = (async () => {
+    await msalInstance.initialize();
+    loadAppSessionMeta();
+
+    let resp = null;
+
+    try {
+      resp = await msalInstance.handleRedirectPromise();
+    } catch (e) {
+      if (isMsalNoTokenRequestCacheError(e)) {
+        console.warn("[MSAL] Ignoring no_token_request_cache_error during redirect handling:", e);
+        resp = null;
+      } else {
+        throw e;
+      }
+    }
+
+    if (resp?.account) {
+      msalInstance.setActiveAccount(resp.account);
+      recordAuthenticatedSession({ reset: true });
+    }
+
+    const acc = msalInstance.getActiveAccount() || msalInstance.getAllAccounts()[0] || null;
+    if (acc) {
+      msalInstance.setActiveAccount(acc);
+    }
+
+    _authInited = true;
+    return acc;
+  })();
+
+  try {
+    return await _authInitPromise;
+  } finally {
+    _authInitPromise = null;
+  }
 }
 
 async function login() {
   try {
-    if (!_authInited) {
-      await initAuth();
+    await initAuth();
+
+    if (msalInstance.getActiveAccount()) {
+      appendLogLine("Already signed in.");
+      return;
+    }
+
+    const interactionStatus = sessionStorage.getItem("msal.interaction.status");
+    if (interactionStatus) {
+      appendLogLine(`MSAL interaction already in progress: ${interactionStatus}`);
+      return;
     }
 
     appendLogLine("Starting Microsoft login redirect…");
@@ -831,9 +1373,20 @@ async function login() {
     await msalInstance.loginRedirect({
       scopes: SCOPES,
       prompt: "select_account",
-      redirectStartPage: window.location.href,
+      redirectStartPage: REDIRECT_URI,
     });
   } catch (e) {
+    if (isMsalNoTokenRequestCacheError(e)) {
+      console.warn("[MSAL] Suppressed no_token_request_cache_error in login():", e);
+      appendLogLine("MSAL redirect cache mismatch detected. Retry the sign-in once.");
+      return;
+    }
+
+    if (isMsalInteractionInProgressError(e)) {
+      appendLogLine("Login already in progress. Please wait for redirect handling to finish.");
+      return;
+    }
+
     console.error(e);
     const msg = normalizeErrorMessage(e);
     appendLogLine(`Login failed: ${msg}`);
@@ -842,14 +1395,25 @@ async function login() {
 }
 
 async function getAccessToken() {
+  await initAuth();
+
   const account = msalInstance.getActiveAccount() || msalInstance.getAllAccounts()[0];
   if (!account) throw new Error("No active account. Click Login first.");
 
   try {
     const res = await msalInstance.acquireTokenSilent({ account, scopes: SCOPES });
     return res.accessToken;
-  } catch {
-    await msalInstance.acquireTokenRedirect({ account, scopes: SCOPES });
+  } catch (e) {
+    if (isMsalInteractionInProgressError(e)) {
+      throw new Error("Authentication interaction already in progress.");
+    }
+
+    await msalInstance.acquireTokenRedirect({
+      account,
+      scopes: SCOPES,
+      redirectStartPage: REDIRECT_URI,
+    });
+
     throw new Error("Redirecting for token...");
   }
 }
@@ -1043,13 +1607,651 @@ function isFromMe(msg, myUserId) {
   return !!(uid && myUserId && uid === myUserId);
 }
 
+function isEmojiOnlyHtml(html) {
+  const text = extractPlainTextFromHtml(normalizeTeamsHtml(html || ""))
+    .replace(/\uFE0F/g, "")
+    .replace(/\s+/g, "")
+    .trim();
+
+  if (!text) return false;
+
+  return /^[\p{Extended_Pictographic}\u2600-\u27BF\u{1F1E6}-\u{1F1FF}]+$/u.test(text);
+}
+
 function extractBodyHtml(msg) {
   const b = msg?.body;
   if (!b?.content) return "";
+
   if ((b.contentType || "").toLowerCase() === "text") {
-    return `<div>${esc(b.content)}</div>`;
+    return normalizeTeamsHtml(`<div>${esc(b.content)}</div>`);
   }
-  return String(b.content);
+
+  return normalizeTeamsHtml(String(b.content));
+}
+
+function extractPlainTextFromHtml(html) {
+  const src = String(html || "").trim();
+  if (!src) return "";
+
+  try {
+    const doc = new DOMParser().parseFromString(src, "text/html");
+    return (doc.body?.textContent || "").replace(/\s+/g, " ").trim();
+  } catch {
+    return src.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+  }
+}
+
+function extractTextFromAnyHtmlish(value) {
+  const src = String(value || "").trim();
+  if (!src) return "";
+
+  try {
+    const doc = new DOMParser().parseFromString(src, "text/html");
+    return (doc.body?.textContent || "").replace(/\s+/g, " ").trim();
+  } catch {
+    return src.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+  }
+}
+
+function collectEventDetailTextCandidates(eventDetail) {
+  if (!eventDetail || typeof eventDetail !== "object") return [];
+
+  const candidates = [];
+
+    const push = (v) => {
+    const s = extractTextFromAnyHtmlish(v);
+    if (!s) return;
+    if (isGuidLike(s)) return;
+    if (isIsoDateTimeLike(s)) return;
+    if (s === "0001-01-01T00:00:00Z") return;
+    if (s === "aadUser") return;
+    if (s.startsWith("#microsoft.graph.")) return;
+
+    candidates.push(s);
+  };
+
+  for (const [key, value] of Object.entries(eventDetail)) {
+    if (key === "@odata.type") continue;
+
+    if (value == null) continue;
+
+    if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+      push(String(value));
+      continue;
+    }
+
+    if (Array.isArray(value)) {
+      for (const item of value) {
+        if (item == null) continue;
+
+        if (typeof item === "string" || typeof item === "number" || typeof item === "boolean") {
+          push(String(item));
+          continue;
+        }
+
+        if (typeof item === "object") {
+          push(item.displayName);
+          push(item.userPrincipalName);
+          push(item.email);
+          push(item.id);
+
+          for (const nested of Object.values(item)) {
+            if (typeof nested === "string" || typeof nested === "number" || typeof nested === "boolean") {
+              push(String(nested));
+            }
+          }
+        }
+      }
+      continue;
+    }
+
+    if (typeof value === "object") {
+      push(value.displayName);
+      push(value.userPrincipalName);
+      push(value.email);
+      push(value.id);
+
+      for (const nested of Object.values(value)) {
+        if (typeof nested === "string" || typeof nested === "number" || typeof nested === "boolean") {
+          push(String(nested));
+        }
+      }
+    }
+  }
+
+  return [...new Set(candidates.filter(Boolean))];
+}
+
+function getEventDetailActorId(eventDetail) {
+  if (!eventDetail || typeof eventDetail !== "object") return "";
+
+  const candidates = [
+    eventDetail?.initiator?.user?.id,
+    eventDetail?.initiator?.id,
+    eventDetail?.from?.user?.id,
+    eventDetail?.from?.id,
+    eventDetail?.sender?.user?.id,
+    eventDetail?.sender?.id,
+    eventDetail?.user?.id,
+    eventDetail?.userId,
+    eventDetail?.actor?.user?.id,
+    eventDetail?.actor?.id,
+  ]
+    .map((x) => String(x || "").trim())
+    .filter(Boolean);
+
+  return candidates[0] || "";
+}
+
+function getEventDetailTargetIds(eventDetail) {
+  if (!eventDetail || typeof eventDetail !== "object") return [];
+
+  const out = [];
+
+  const add = (value) => {
+    const id = String(value || "").trim();
+    if (id) out.push(id);
+  };
+
+  const arraysToCheck = [
+    eventDetail?.members,
+    eventDetail?.memberDetails,
+    eventDetail?.participants,
+    eventDetail?.users,
+    eventDetail?.targets,
+    eventDetail?.addedMembers,
+    eventDetail?.removedMembers,
+  ];
+
+  for (const arr of arraysToCheck) {
+    if (!Array.isArray(arr)) continue;
+
+    for (const item of arr) {
+      add(item?.user?.id);
+      add(item?.id);
+      add(item?.userId);
+      add(item?.member?.id);
+      add(item?.member?.user?.id);
+    }
+  }
+
+  const directCandidates = [
+    eventDetail?.member?.user?.id,
+    eventDetail?.member?.id,
+    eventDetail?.target?.user?.id,
+    eventDetail?.target?.id,
+    eventDetail?.targetUserId,
+    eventDetail?.addedMember?.user?.id,
+    eventDetail?.addedMember?.id,
+    eventDetail?.removedMember?.user?.id,
+    eventDetail?.removedMember?.id,
+  ];
+
+  for (const c of directCandidates) add(c);
+
+  return [...new Set(out)];
+}
+
+function resolveNameListByIds(ids, members, me) {
+  const out = [];
+
+  for (const id of ids) {
+    const name = resolveUserDisplayNameById(id, members, me);
+    if (name) out.push(name);
+  }
+
+  return [...new Set(out)];
+}
+
+function buildKnownMemberIdSet(members, me) {
+  const set = new Set();
+
+  for (const member of Array.isArray(members) ? members : []) {
+    for (const value of collectMemberCandidateIds(member)) {
+      for (const key of extractCanonicalIdentityKeys(value)) {
+        set.add(key);
+      }
+    }
+  }
+
+  for (const value of [me?.id, me?.userPrincipalName, me?.mail].filter(Boolean)) {
+    for (const key of extractCanonicalIdentityKeys(value)) {
+      set.add(key);
+    }
+  }
+
+  return set;
+}
+
+function extractAllGuidLikeIdsDeep(obj) {
+  const out = new Set();
+
+  function walk(value) {
+    if (value == null) return;
+
+    if (typeof value === "string") {
+      const s = value.trim();
+      if (isGuidLike(s)) out.add(s);
+      return;
+    }
+
+    if (Array.isArray(value)) {
+      for (const item of value) walk(item);
+      return;
+    }
+
+    if (typeof value === "object") {
+      for (const v of Object.values(value)) walk(v);
+    }
+  }
+
+  walk(obj);
+  return [...out];
+}
+
+function filterIdsToKnownChatMembers(ids, members, me) {
+  const known = buildKnownMemberIdSet(members, me);
+
+  return [...new Set(
+    (Array.isArray(ids) ? ids : [])
+      .map((x) => String(x || "").trim())
+      .filter(Boolean)
+      .filter((id) => {
+        const keys = extractCanonicalIdentityKeys(id);
+        return keys.some((k) => known.has(k));
+      })
+  )];
+}
+
+function getDeepStringValues(obj) {
+  const out = [];
+
+  function walk(value) {
+    if (value == null) return;
+
+    if (typeof value === "string") {
+      const s = value.trim();
+      if (s) out.push(s);
+      return;
+    }
+
+    if (Array.isArray(value)) {
+      for (const item of value) walk(item);
+      return;
+    }
+
+    if (typeof value === "object") {
+      for (const v of Object.values(value)) walk(v);
+    }
+  }
+
+  walk(obj);
+  return out;
+}
+
+async function fetchAsDataUrl(url, accessToken) {
+  const res = await fetch(url, {
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+    },
+  });
+
+  const buffer = await res.arrayBuffer();
+  const bytes = new Uint8Array(buffer);
+
+  let binary = "";
+  const chunkSize = 0x8000;
+
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    const subarray = bytes.subarray(i, i + chunkSize);
+    binary += String.fromCharCode(...subarray);
+  }
+
+  const base64 = btoa(binary);
+  const contentType = res.headers.get("content-type") || "application/octet-stream";
+
+  return `data:${contentType};base64,${base64}`;
+}
+
+function renderAttachment(att) {
+  const { contentType, dataUrl, fileName } = att;
+
+  if (!dataUrl) {
+    return `<div class="attachment-warning">⚠️ File not available offline: ${fileName}</div>`;
+  }
+
+  if (contentType.startsWith("image/")) {
+    return `<img src="${dataUrl}" class="chat-image" />`;
+  }
+
+  if (contentType.startsWith("video/")) {
+    return `
+      <video controls class="chat-video">
+        <source src="${dataUrl}" type="${contentType}" />
+        Your browser does not support the video tag.
+      </video>
+    `;
+  }
+
+  if (contentType.startsWith("text/")) {
+    return `<pre class="chat-text-file">${escapeHtml(atob(dataUrl.split(",")[1]))}</pre>`;
+  }
+
+  return `<div class="attachment-warning">📎 ${fileName} (preview not supported)</div>`;
+}
+
+function extractRenameTargetName(eventDetail) {
+  const isTeamsOpaqueId = (value) => {
+    const s = String(value || "").trim();
+    if (!s) return false;
+
+    const lower = s.toLowerCase();
+
+    // Common Teams / chat thread identifiers
+    if (/^19:[a-z0-9._:-]+@thread\.v2$/i.test(s)) return true;
+    if (/^19:[a-z0-9._:-]+@unq\.gbl\.spaces$/i.test(s)) return true;
+    if (/^28:[a-z0-9._:-]+$/i.test(s)) return true;
+    if (/^8:[a-z0-9._:-]+$/i.test(s)) return true;
+
+    // Opaque ids that look like service routing identifiers, not titles
+    if (lower.includes("@thread.v2")) return true;
+    if (lower.includes("@unq.gbl.spaces")) return true;
+
+    return false;
+  };
+
+  const isBadRenameCandidate = (value) => {
+    const s = String(value || "").trim();
+    if (!s) return true;
+
+    if (isIsoDateTimeLike(s)) return true;
+
+    const lower = s.toLowerCase();
+
+    if (s === "aadUser") return true;
+    if (s === "0001-01-01T00:00:00Z") return true;
+    if (isGuidLike(s)) return true;
+    if (isTeamsOpaqueId(s)) return true;
+
+    // OData / Graph type markers
+    if (s.startsWith("#microsoft.graph.")) return true;
+    if (lower.includes("microsoft.graph.")) return true;
+    if (lower.includes("@odata.type")) return true;
+
+    // Known non-title event markers
+    const blocked = new Set([
+      "unknownfuturevalue",
+      "chatrenamedeventmessagedetail",
+      "membersaddedeventmessagedetail",
+      "membersremovedeventmessagedetail",
+      "historysharedeventmessagedetail",
+      "chatrenamed",
+      "membersadded",
+      "membersremoved",
+      "historyshared",
+      "eventmessage",
+      "systemevent",
+      "thread.v2",
+    ]);
+
+    if (blocked.has(lower)) return true;
+
+    return false;
+  };
+
+  const preferredKeys = [
+    "topic",
+    "chatName",
+    "newTopic",
+    "newChatName",
+    "displayName",
+    "title",
+    "name",
+  ];
+
+  for (const key of preferredKeys) {
+    const v = String(eventDetail?.[key] || "").trim();
+    if (v && !isBadRenameCandidate(v)) return v;
+  }
+
+  const strings = getDeepStringValues(eventDetail)
+    .map((x) => String(x || "").trim())
+    .filter(Boolean)
+    .filter((x) => !isBadRenameCandidate(x));
+
+  const humanish = strings.filter((x) => {
+    if (x.length < 2) return false;
+    if (!/[a-zа-я0-9]/i.test(x)) return false;
+    return true;
+  });
+
+  humanish.sort((a, b) => b.length - a.length);
+  return humanish[0] || "";
+}
+function resolveLikelyActorAndTargets(eventDetail, members, me) {
+  const actorIdRaw = getEventDetailActorId(eventDetail);
+  const deepIds = extractAllGuidLikeIdsDeep(eventDetail);
+  const knownIds = filterIdsToKnownChatMembers(deepIds, members, me);
+
+  let actorId = "";
+  if (actorIdRaw) {
+    const actorKeys = extractCanonicalIdentityKeys(actorIdRaw);
+    const known = buildKnownMemberIdSet(members, me);
+
+    if (actorKeys.some((k) => known.has(k))) {
+      actorId = actorIdRaw;
+    }
+  }
+
+  let targetIds = getEventDetailTargetIds(eventDetail);
+  targetIds = filterIdsToKnownChatMembers(targetIds, members, me);
+
+  // Fallback: if explicit targets are missing, use known deep IDs
+  if (!targetIds.length) {
+    targetIds = knownIds;
+  }
+
+  // If actor is still missing, infer from current user universe:
+  // choose one ID as actor and the rest as targets only when we have >1 known IDs.
+  if (!actorId && knownIds.length > 1) {
+    actorId = knownIds[0];
+    targetIds = knownIds.slice(1);
+  }
+
+  // Remove actor from targets if present
+  if (actorId) {
+    const actorNorm = normalizeId(actorId);
+    targetIds = targetIds.filter((id) => normalizeId(id) !== actorNorm);
+  }
+
+  const actorName = actorId
+    ? (resolveUserDisplayNameById(actorId, members, me) || "")
+    : "";
+
+  const targetNames = resolveNameListByIds(targetIds, members, me);
+
+  return {
+    actorId,
+    actorName,
+    targetIds,
+    targetNames,
+  };
+}
+
+function isIsoDateTimeLike(value) {
+  const s = String(value || "").trim();
+  if (!s) return false;
+
+  return /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,7})?Z$/i.test(s);
+}
+
+function extractSystemEventText(msg, fallbackBodyHtml = "", members = [], me = null) {
+  const fromBody = extractPlainTextFromHtml(fallbackBodyHtml);
+  if (fromBody) return fromBody;
+
+  const eventDetail = msg?.eventDetail || {};
+  const type = String(eventDetail?.["@odata.type"] || "").toLowerCase();
+  const mt = String(msg?.messageType || "").trim().toLowerCase();
+
+  const resolved = resolveLikelyActorAndTargets(eventDetail, members, me);
+  const actorName = resolved.actorName;
+  const targetNames = resolved.targetNames;
+
+  const historyShared =
+    eventDetail?.historyShared === true ||
+    String(eventDetail?.historyShared || "").toLowerCase() === "true";
+
+  if (type.includes("membersadded") || mt.includes("membersadded")) {
+    if (actorName && targetNames.length) {
+      return `${actorName} added ${targetNames.join(", ")} to the chat${historyShared ? " and shared all chat history" : ""}`;
+    }
+
+    if (targetNames.length) {
+      return `${targetNames.join(", ")} joined the chat`;
+    }
+  }
+
+  if (type.includes("membersremoved") || mt.includes("membersremoved")) {
+    if (actorName && targetNames.length) {
+      return `${actorName} removed ${targetNames.join(", ")} from the chat`;
+    }
+
+    if (targetNames.length === 1) {
+      return `${targetNames[0]} was removed from the chat`;
+    }
+
+    if (targetNames.length > 1) {
+      return `${targetNames.join(", ")} were removed from the chat`;
+    }
+  }
+
+    if (type.includes("chatrenamed") || mt.includes("chatrenamed")) {
+  const renamedTo = extractRenameTargetName(eventDetail);
+
+  if (renamedTo) {
+    const looksBad =
+      renamedTo.startsWith("#microsoft.graph.") ||
+      /^19:[a-z0-9._:-]+@thread\.v2$/i.test(renamedTo) ||
+      /^19:[a-z0-9._:-]+@unq\.gbl\.spaces$/i.test(renamedTo);
+
+    if (!looksBad) {
+      if (actorName) {
+        return `${actorName} changed the chat name to "${renamedTo}"`;
+      }
+      return `Chat name changed to "${renamedTo}"`;
+    }
+  }
+
+  return actorName
+    ? `${actorName} changed the chat name`
+    : "Chat name changed";
+}
+
+  if (type.includes("historyshared") || mt.includes("historyshared")) {
+    if (actorName) return `${actorName} shared chat history`;
+    return "Chat history was shared";
+  }
+
+    const detailCandidates = collectEventDetailTextCandidates(eventDetail)
+    .filter((x) => x !== "aadUser")
+    .filter((x) => x !== "0001-01-01T00:00:00Z")
+    .filter((x) => !isGuidLike(x))
+    .filter((x) => !isIsoDateTimeLike(x))
+    .filter((x) => !/^#microsoft\.graph\./i.test(String(x || "").trim()));
+
+  if (detailCandidates.length) {
+    const combined = detailCandidates.join(" ").replace(/\s+/g, " ").trim();
+    if (combined) return combined;
+  }
+
+  const bodyContentDirect = extractTextFromAnyHtmlish(msg?.body?.content);
+  if (bodyContentDirect) return bodyContentDirect;
+
+  // 🔥 SPECIAL HANDLING FOR unknownFutureValue
+if (mt.includes("unknownfuturevalue") || type.includes("unknownfuturevalue")) {
+
+  if (targetNames.length && actorName) {
+    // Try heuristic: if only 1 target → likely remove
+    if (targetNames.length === 1) {
+      return `${actorName} removed ${targetNames[0]} from the chat`;
+    }
+
+    // Multiple → assume add
+    if (targetNames.length > 1) {
+      return `${actorName} updated chat participants (${targetNames.join(", ")})`;
+    }
+  }
+
+  if (targetNames.length === 1) {
+    return `${targetNames[0]} was removed from the chat`;
+  }
+
+  if (targetNames.length > 1) {
+    return `Chat participants updated (${targetNames.join(", ")})`;
+  }
+
+  return "Chat participants updated";
+}
+}
+
+function normalizeSystemEventHtml(input) {
+  const src = String(input || "").trim();
+  if (!src) return `<div class="systemEventText">[System event]</div>`;
+
+  try {
+    const doc = new DOMParser().parseFromString(src, "text/html");
+    const text = (doc.body?.textContent || "").replace(/\s+/g, " ").trim();
+    if (!text) return `<div class="systemEventText">[System event]</div>`;
+
+    return `<div class="systemEventText">${esc(text)}</div>`;
+  } catch {
+    const text = src.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+    return text
+      ? `<div class="systemEventText">${esc(text)}</div>`
+      : `<div class="systemEventText">[System event]</div>`;
+  }
+}
+
+function extractUserIdsFromEventDetail(eventDetail) {
+  const ids = new Set();
+
+  function walk(obj) {
+    if (!obj || typeof obj !== "object") return;
+
+    if (typeof obj.id === "string" && obj.id.length > 20) {
+      ids.add(obj.id);
+    }
+
+    for (const v of Object.values(obj)) {
+      if (typeof v === "object") walk(v);
+    }
+  }
+
+  walk(eventDetail);
+  return Array.from(ids);
+}
+
+function isSystemEventMessage(msg, bodyHtml = "") {
+  const mt = String(msg?.messageType || "").trim().toLowerCase();
+  const eventType = String(msg?.eventDetail?.["@odata.type"] || "").trim().toLowerCase();
+  const text = extractPlainTextFromHtml(bodyHtml).toLowerCase();
+
+  if (mt && mt !== "message") return true;
+  if (eventType) return true;
+
+  const systemPatterns = [
+    " added ",
+    " removed ",
+    " joined the chat",
+    " left the chat",
+    " renamed the chat",
+    " changed the chat",
+    " changed the topic",
+    " shared all chat history",
+    " shared chat history",
+  ];
+
+  return systemPatterns.some((p) => text.includes(p));
 }
 
 function shouldAttemptHosted(bodyHtml) {
@@ -1073,6 +2275,30 @@ function buildReactionsFromGraph(msg, members, me) {
 
     const name = resolveReactionUserDisplayName(r, members, me);
 
+    if (!name) {
+      console.warn("[REACTION UNRESOLVED]", {
+        messageId: msg?.id || "",
+        reactionType,
+        reaction: r,
+        me: {
+          id: me?.id || "",
+          userPrincipalName: me?.userPrincipalName || "",
+          displayName: me?.displayName || "",
+        },
+        memberSample: (members || []).slice(0, 8).map((m) => ({
+          displayName: m?.displayName || "",
+          id: m?.id || "",
+          userId: m?.userId || "",
+          email: m?.email || "",
+          user: {
+            id: m?.user?.id || "",
+            displayName: m?.user?.displayName || "",
+            email: m?.user?.email || "",
+          },
+        })),
+      });
+    }
+
     if (!acc.has(key)) {
       acc.set(key, {
         visual,
@@ -1084,7 +2310,10 @@ function buildReactionsFromGraph(msg, members, me) {
 
     const v = acc.get(key);
     v.count += 1;
-    if (name) v.names.push(name);
+
+    if (name) {
+      v.names.push(name);
+    }
   }
 
   let out = `<div class="reactions">`;
@@ -1095,7 +2324,7 @@ function buildReactionsFromGraph(msg, members, me) {
       String(a[1].visual).localeCompare(String(b[1].visual))
     );
   })) {
-    const uniqNames = [...new Set(v.names)].slice(0, 100);
+    const uniqNames = [...new Set(v.names.map((x) => String(x).trim()).filter(Boolean))].slice(0, 100);
     const joinedNames = uniqNames.join(" | ");
 
     out += `
@@ -1290,22 +2519,66 @@ function blobToDataUrl(blob) {
 
 function tokenizeHostedImages(bodyHtml, hostedList) {
   const html = String(bodyHtml || "");
-  const hostedIds = (hostedList || []).map((h) => h?.id).filter(Boolean);
-  if (!html || !hostedIds.length) return { html, hostedIds: [] };
+  const hosted = Array.isArray(hostedList) ? hostedList.filter(Boolean) : [];
+  const hostedIds = hosted.map((h) => String(h?.id || "").trim()).filter(Boolean);
+
+  if (!html || !hostedIds.length) {
+    return { html, hostedIds: [] };
+  }
 
   try {
     const doc = new DOMParser().parseFromString(html, "text/html");
     const imgs = Array.from(doc.querySelectorAll("img"));
 
-    for (const img of imgs) {
-      const src = img.getAttribute("src") || "";
-      const hit = hostedIds.find((id) => src.includes(id));
-      if (!hit) continue;
-      img.setAttribute("data-hid", hit);
-      if (!img.getAttribute("data-src-orig")) img.setAttribute("data-src-orig", src);
+    if (!imgs.length) {
+      return { html: doc.body.innerHTML || html, hostedIds };
     }
 
-    return { html: doc.body.innerHTML || html, hostedIds };
+    const usedHostedIds = new Set();
+
+    // Pass 1: exact/strong match by hosted id inside src or outerHTML
+    for (const img of imgs) {
+      const src = String(img.getAttribute("src") || "").trim();
+      const outer = String(img.outerHTML || "");
+
+      const hit = hostedIds.find((id) => {
+        if (usedHostedIds.has(id)) return false;
+        return src.includes(id) || outer.includes(id);
+      });
+
+      if (!hit) continue;
+
+      img.setAttribute("data-hid", hit);
+      if (!img.getAttribute("data-src-orig")) {
+        img.setAttribute("data-src-orig", src);
+      }
+
+      usedHostedIds.add(hit);
+    }
+
+    // Pass 2: fallback sequential assignment for unmatched images
+    const remainingHostedIds = hostedIds.filter((id) => !usedHostedIds.has(id));
+    const unmatchedImgs = imgs.filter((img) => !img.getAttribute("data-hid"));
+
+    if (remainingHostedIds.length && unmatchedImgs.length) {
+      const count = Math.min(remainingHostedIds.length, unmatchedImgs.length);
+
+      for (let i = 0; i < count; i++) {
+        const img = unmatchedImgs[i];
+        const hid = remainingHostedIds[i];
+        const src = String(img.getAttribute("src") || "").trim();
+
+        img.setAttribute("data-hid", hid);
+        if (!img.getAttribute("data-src-orig")) {
+          img.setAttribute("data-src-orig", src);
+        }
+      }
+    }
+
+    return {
+      html: doc.body.innerHTML || html,
+      hostedIds,
+    };
   } catch {
     return { html, hostedIds };
   }
@@ -1466,7 +2739,7 @@ function extractForwardedAttachmentData(attachments, members, me) {
     : "") ||
   "Unknown";
 
-    const originalContent = normalizeTeamsHtml(obj?.originalMessageContent || "");
+    const originalContent = normalizeTeamsHtml(String(obj?.originalMessageContent || ""));
     const originalSentDateTime = obj?.originalSentDateTime || "";
     const originalConversationId = obj?.originalConversationId || "";
     const originalMessageId = obj?.originalMessageId || "";
@@ -1492,37 +2765,22 @@ function extractForwardedAttachmentData(attachments, members, me) {
   return forwarded;
 }
 
-async function enrichForwardedAuthors(forwardedItems, currentMembers, me) {
+async function enrichForwardedAuthors(forwardedItems, currentMembers, me, stats = null) {
   const items = Array.isArray(forwardedItems) ? forwardedItems : [];
   if (!items.length) return items;
 
   for (const item of items) {
     if (!item?.isForwarded) continue;
 
-    const alreadyResolved =
-      item.originalAuthor &&
-      String(item.originalAuthor).trim() &&
-      String(item.originalAuthor).trim().toLowerCase() !== "unknown";
-
-    if (alreadyResolved) continue;
-
     const originalUserId = String(item.originalAuthorId || "").trim();
     const originalConversationId = String(item.originalConversationId || "").trim();
     const originalMessageId = String(item.originalMessageId || "").trim();
 
-    let resolved = "";
+    let originalMsg = null;
 
-    if (originalUserId) {
-      resolved = resolveUserDisplayNameById(originalUserId, currentMembers, me) || "";
-    }
-
-    if (!resolved && originalConversationId && originalMessageId) {
+    if (originalConversationId && originalMessageId) {
       try {
-        const originalMsg = await loadSingleChatMessage(originalConversationId, originalMessageId);
-        resolved =
-          originalMsg?.from?.user?.displayName ||
-          originalMsg?.from?.application?.displayName ||
-          "";
+        originalMsg = await loadSingleChatMessage(originalConversationId, originalMessageId);
       } catch (e) {
         appendLogLine(
           `Forwarded original message lookup failed (${originalConversationId}/${originalMessageId}): ${normalizeErrorMessage(e)}`
@@ -1530,18 +2788,109 @@ async function enrichForwardedAuthors(forwardedItems, currentMembers, me) {
       }
     }
 
-    if (!resolved && originalUserId && originalConversationId) {
+    // Resolve author
+    const alreadyResolved =
+      item.originalAuthor &&
+      String(item.originalAuthor).trim() &&
+      String(item.originalAuthor).trim().toLowerCase() !== "unknown";
+
+    if (!alreadyResolved) {
+      let resolved = "";
+
+      if (originalUserId) {
+        resolved = resolveUserDisplayNameById(originalUserId, currentMembers, me) || "";
+      }
+
+      if (!resolved && originalMsg) {
+        resolved =
+          originalMsg?.from?.user?.displayName ||
+          originalMsg?.from?.application?.displayName ||
+          "";
+      }
+
+      if (!resolved && originalUserId && originalConversationId) {
+        try {
+          const originalMembers = await loadChatMembersCached(originalConversationId);
+          resolved = resolveUserDisplayNameById(originalUserId, originalMembers, me) || "";
+        } catch (e) {
+          appendLogLine(
+            `Forwarded author member lookup failed (${originalConversationId}): ${normalizeErrorMessage(e)}`
+          );
+        }
+      }
+
+      item.originalAuthor = resolved || "Unknown";
+    }
+
+    // Resolve timestamp
+    if ((!item.originalTs || !String(item.originalTs).trim()) && originalMsg?.createdDateTime) {
+      const d = new Date(originalMsg.createdDateTime);
+      if (!isNaN(d.getTime())) {
+        item.originalTs = formatDDMMYYYY_HHMMSS(d);
+      }
+    }
+
+    const payloadBodyHtml = normalizeTeamsHtml(String(item.originalBodyHtml || ""));
+    const messageBodyHtml = originalMsg
+      ? normalizeTeamsHtml(String(extractBodyHtml(originalMsg) || ""))
+      : "";
+
+    let originalBodyHtml = payloadBodyHtml || messageBodyHtml || "";
+
+    // Prefer original message body when it contains images or looks richer
+    const payloadHasImg = /<img\b/i.test(payloadBodyHtml);
+    const messageHasImg = /<img\b/i.test(messageBodyHtml);
+
+    if (messageHasImg) {
+      originalBodyHtml = messageBodyHtml;
+    } else if (!payloadBodyHtml && messageBodyHtml) {
+      originalBodyHtml = messageBodyHtml;
+    } else if (
+      messageBodyHtml &&
+      stripToPreviewText(messageBodyHtml, 500).length > stripToPreviewText(payloadBodyHtml, 500).length
+    ) {
+      originalBodyHtml = messageBodyHtml;
+    }
+
+    // Embed hosted images from original message
+    if (originalConversationId && originalMessageId && shouldAttemptHosted(originalBodyHtml)) {
       try {
-        const originalMembers = await loadChatMembersCached(originalConversationId);
-        resolved = resolveUserDisplayNameById(originalUserId, originalMembers, me) || "";
+        const hosted = await listHostedContents(originalConversationId, originalMessageId);
+
+        if (Array.isArray(hosted) && hosted.length) {
+          const tok = tokenizeHostedImages(originalBodyHtml, hosted);
+          originalBodyHtml = tok.html;
+
+          originalBodyHtml = await embedHostedImages(
+            originalConversationId,
+            originalMessageId,
+            originalBodyHtml,
+            hosted,
+            stats || {
+              imagesEmbedded: 0,
+              imagesBytes: 0,
+              failures: [],
+            }
+          );
+        }
       } catch (e) {
+        if (stats?.failures) {
+          stats.failures.push({
+            kind: "forwardedHostedImage",
+            stage: "enrichForwardedAuthors",
+            originalConversationId,
+            originalMessageId,
+            error: normalizeErrorMessage(e),
+          });
+        }
+
         appendLogLine(
-          `Forwarded author member lookup failed (${originalConversationId}): ${normalizeErrorMessage(e)}`
+          `Forwarded hosted content lookup failed (${originalConversationId}/${originalMessageId}): ${normalizeErrorMessage(e)}`
         );
       }
     }
 
-    item.originalAuthor = resolved || "Unknown";
+    item.originalBodyHtml = originalBodyHtml || "";
   }
 
   return items;
@@ -1627,6 +2976,8 @@ function tokenizeFileAttachments(bodyHtml, attachments, fileTokenToMeta) {
 
   for (const a of attachments) {
     const name = (a?.name || a?.contentUrl || a?.id || "attachment").toString().trim();
+    const contentType = String(a?.contentType || "").trim().toLowerCase();
+    const contentUrl = String(a?.contentUrl || "").trim();
 
     if (a?.contentBytes && a?.contentType) {
       const token = `FILE_${++seq}`;
@@ -1636,18 +2987,20 @@ function tokenizeFileAttachments(bodyHtml, attachments, fileTokenToMeta) {
         contentType: a.contentType,
         contentBytes: a.contentBytes,
         url: "",
+        rawAttachment: a,
       });
       html += `<div data-file-token="${token}">📎 ${esc(name)}</div>`;
       continue;
     }
 
-    const contentUrl = (a?.contentUrl || "").trim();
     if (contentUrl && /^https?:\/\//i.test(contentUrl)) {
       const token = `FILE_${++seq}`;
       fileTokenToMeta.set(token, {
         fileName: safeFileName(name),
         kind: "shareLink",
         url: contentUrl,
+        contentType,
+        rawAttachment: a,
       });
       html += `<div data-file-token="${token}">📎 ${esc(name)}</div>`;
       continue;
@@ -1658,6 +3011,8 @@ function tokenizeFileAttachments(bodyHtml, attachments, fileTokenToMeta) {
       fileName: safeFileName(name),
       kind: "unknown",
       url: "",
+      contentType,
+      rawAttachment: a,
     });
     html += `<div data-file-token="${token}">📎 ${esc(name)}</div>`;
   }
@@ -1673,9 +3028,7 @@ async function embedFileAttachments(fileTokenToMeta, stats) {
   const entries = [...fileTokenToMeta.entries()].filter(([k]) => /^FILE_\d+$/.test(k));
 
   for (const [token, meta] of entries) {
-    if (total >= LIMITS.MAX_ATTACH_BYTES_TOTAL) break;
-
-    const fileName = meta.fileName || "File";
+    const fileName = meta?.fileName || "File";
     const ext = extOf(fileName);
 
     if (LIMITS.DENY_EXT.has(ext)) {
@@ -1690,51 +3043,103 @@ async function embedFileAttachments(fileTokenToMeta, stats) {
     }
 
     try {
-      if (meta.kind === "inline" && meta.contentBytes && meta.contentType) {
-        const b64 = meta.contentBytes;
-        const size = Math.floor((b64.length * 3) / 4);
-        if (size <= 0) throw new Error("inline_empty");
-        if (size > LIMITS.MAX_ATTACH_BYTES_EACH) throw new Error("inline_too_large_each");
-        if (total + size > LIMITS.MAX_ATTACH_BYTES_TOTAL) throw new Error("inline_too_large_total");
+      let blob = null;
+      let mime = String(meta?.contentType || "").trim() || "application/octet-stream";
+      let fileSize = 0;
 
-        const dataUrl = `data:${meta.contentType};base64,${b64}`;
-        tokenToDataUrl.set(token, { dataUrl, fileName, size });
-        stats.attachEmbedded = (stats.attachEmbedded || 0) + 1;
-        total += size;
-        stats.attachBytes = total;
-        continue;
-      }
-
-      if (meta.kind === "shareLink" && meta.url) {
+      if (meta?.kind === "inline" && meta?.contentBytes && meta?.contentType) {
+        mime = meta.contentType || "application/octet-stream";
+        blob = base64ToBlob(meta.contentBytes, mime);
+        fileSize = blob?.size || Math.floor((meta.contentBytes.length * 3) / 4);
+      } else if (meta?.kind === "shareLink" && meta?.url) {
         const driveItem = await getDriveItemFromSharingUrl(meta.url);
         const driveId = driveItem?.parentReference?.driveId;
         const itemId = driveItem?.id;
-        if (!driveId || !itemId) throw new Error("driveItem_missing_ids");
 
-        const blob = await downloadDriveItemContent(driveId, itemId);
-        const size = blob.size || 0;
-        if (size <= 0) throw new Error("blob_empty");
-        if (size > LIMITS.MAX_ATTACH_BYTES_EACH) throw new Error("too_large_each");
-        if (total + size > LIMITS.MAX_ATTACH_BYTES_TOTAL) throw new Error("too_large_total");
+        if (!driveId || !itemId) {
+          throw new Error("driveItem_missing_ids");
+        }
 
-        const dataUrl = await blobToDataUrl(blob);
-        if (!dataUrl.startsWith("data:")) throw new Error("dataurl_invalid");
+        blob = await downloadDriveItemContent(driveId, itemId);
+        mime =
+          blob?.type ||
+          meta?.contentType ||
+          driveItem?.file?.mimeType ||
+          "application/octet-stream";
+        fileSize = blob?.size || 0;
+      } else if (meta?.kind === "unknown") {
+        console.warn("[ATTACHMENT UNRESOLVED]", {
+          token,
+          fileName,
+          contentType: meta?.contentType || "",
+          rawAttachment: meta?.rawAttachment || null,
+        });
 
-        tokenToDataUrl.set(token, { dataUrl, fileName, size });
-        stats.attachEmbedded = (stats.attachEmbedded || 0) + 1;
-        total += size;
-        stats.attachBytes = total;
-        continue;
+        throw new Error(
+          meta?.contentType
+            ? `attachment_unresolved_no_url_or_bytes (${meta.contentType})`
+            : "attachment_unresolved_no_url_or_bytes"
+        );
+      } else {
+        throw new Error("unknown_attachment_kind");
       }
 
-      throw new Error("unknown_attachment_kind");
+      if (!blob) {
+        throw new Error("blob_missing");
+      }
+
+      if (fileSize <= 0) {
+        throw new Error("blob_empty");
+      }
+
+      let requireConfirm = false;
+      let reason = "";
+
+      if (fileSize > LIMITS.MAX_ATTACH_BYTES_EACH) {
+        requireConfirm = true;
+        reason = "single_limit";
+      }
+
+      if (total + fileSize > LIMITS.MAX_ATTACH_BYTES_TOTAL) {
+        requireConfirm = true;
+        reason = "total_limit";
+      }
+
+      if (requireConfirm) {
+        const ok = confirmLargeFileEmbed(fileName, fileSize, reason);
+        if (!ok) {
+          stats.failures.push({
+            kind: "attachment",
+            stage: "embedFileAttachments",
+            token,
+            fileName,
+            error: "user_declined_large_embed",
+          });
+          continue;
+        }
+      }
+
+      const dataUrl = await blobToDataUrl(blob);
+      if (!dataUrl.startsWith("data:")) {
+        throw new Error("dataurl_invalid");
+      }
+
+      tokenToDataUrl.set(token, {
+        dataUrl,
+        fileName,
+        size: fileSize,
+        mime,
+      });
+
+      stats.attachEmbedded = (stats.attachEmbedded || 0) + 1;
+      stats.attachBytes = (stats.attachBytes || 0) + fileSize;
+      total += fileSize;
     } catch (e) {
       stats.failures.push({
         kind: "attachment",
         stage: "embedFileAttachments",
         token,
         fileName,
-        url: meta.url || "",
         error: normalizeErrorMessage(e),
       });
     }
@@ -1743,45 +3148,81 @@ async function embedFileAttachments(fileTokenToMeta, stats) {
   return tokenToDataUrl;
 }
 
-function replaceFileTokensOffline(html, tokenToDataUrl, fileTokenToMeta) {
+function replaceFileTokensOffline(html, tokenToDataUrl, fileTokenToMeta, stats = null) {
   let out = html || "";
+  const failureMap = buildAttachmentFailureMap(stats);
 
   out = out.replaceAll(
     /<div\b[^>]*\bdata-file-token=(["'])(FILE_\d+)\1[^>]*>[\s\S]*?<\/div>/gi,
     (full, q, token) => {
       const meta = fileTokenToMeta.get(token) || {};
       const fileName = meta.fileName || "Файл";
-      const online = meta.url || "";
       const got = tokenToDataUrl.get(token);
+      const failure = failureMap.get(token);
 
+      // ✅ SUCCESS — embed-нат файл
       if (got?.dataUrl) {
-        const sizeMb = got.size ? (got.size / 1024 / 1024).toFixed(2) : "";
+        const sizeLabel = got.size ? formatBytesHuman(got.size) : "";
+        const mime = got.mime || meta.contentType || "application/octet-stream";
+
         return `
           <div class="attachmentCard embedded">
             <div class="attIcon">📎</div>
-            <div class="attName" title="${esc(fileName)}">${esc(fileName)}</div>
-            <a class="attDownload" download="${esc(fileName)}" href="${esc(got.dataUrl)}">Свали офлайн</a>
-            <div class="attMeta">${sizeMb ? `${esc(sizeMb)} MB` : ""}</div>
+            <div class="attMain">
+              <div class="attName" title="${esc(fileName)}">${esc(fileName)}</div>
+              <div class="attMeta">${esc(sizeLabel)}${sizeLabel ? " • " : ""}${esc(mime)}</div>
+            </div>
+            <div class="attActions">
+              <button
+                type="button"
+                class="attPreviewBtn"
+                data-file-url="${esc(got.dataUrl)}"
+                data-file-name="${esc(fileName)}"
+                data-file-mime="${esc(mime)}"
+              >
+                Преглед
+              </button>
+              <a class="attDownload" download="${esc(fileName)}" href="${esc(got.dataUrl)}">Свали офлайн</a>
+            </div>
           </div>
         `;
       }
 
-      if (online) {
-        return `
-          <div class="attachmentCard missingLocal">
-            <div class="attIcon">📎</div>
-            <div class="attName" title="${esc(fileName)}">${esc(fileName)}</div>
-            <a class="attDownload" href="${esc(online)}" target="_blank" rel="noreferrer">Свали онлайн</a>
-            <div class="attMissing">не е вграден</div>
-          </div>
-        `;
+      // ❌ FAILURE — user-friendly message
+      let reasonText = "файлът не е вграден";
+
+      const err = (failure?.error || "").toLowerCase();
+
+      // 🔴 НОВО — основен случай (твоят)
+      if (
+        err.includes("404") ||
+        err.includes("notfound") ||
+        err.includes("accessdenied") ||
+        err.includes("share_access_denied_or_expired")
+      ) {
+        reasonText = "файлът не е бил наличен за сваляне от чата";
+      }
+
+      // други случаи (запазваме ги)
+      else if (err.includes("user_declined_large_embed")) {
+        reasonText = "файлът не е вграден (потребителят отказа голям файл)";
+      } else if (err.includes("denied_extension")) {
+        reasonText = "файлът не е вграден (неподдържан тип файл)";
+      } else if (err.includes("too_large_each")) {
+        reasonText = "файлът е твърде голям за вграждане";
+      } else if (err.includes("too_large_total")) {
+        reasonText = "надвишен е общият лимит за файлове";
+      } else if (err.includes("attachment_unresolved")) {
+        reasonText = "файлът не може да бъде извлечен от Teams";
       }
 
       return `
         <div class="attachmentCard missingLocal">
           <div class="attIcon">📎</div>
-          <div class="attName" title="${esc(fileName)}">${esc(fileName)}</div>
-          <div class="attMissing">липсва линк</div>
+          <div class="attMain">
+            <div class="attName" title="${esc(fileName)}">${esc(fileName)}</div>
+            <div class="attMissing">${esc(reasonText)}</div>
+          </div>
         </div>
       `;
     }
@@ -1790,11 +3231,122 @@ function replaceFileTokensOffline(html, tokenToDataUrl, fileTokenToMeta) {
   return out;
 }
 
+function buildParticipantsPanel(members, me) {
+  const list = Array.isArray(members) ? members : [];
+  if (list.length <= 1) return "";
+
+  const normalizedMeIds = new Set(
+    [
+      me?.id,
+      me?.userPrincipalName,
+      me?.mail,
+    ]
+      .map((x) => normalizeId(x))
+      .filter(Boolean)
+  );
+
+  const unique = [];
+  const seen = new Set();
+
+  for (const member of list) {
+    if (!member) continue;
+
+    const ids = collectMemberCandidateIds(member)
+      .map((x) => normalizeId(x))
+      .filter(Boolean);
+
+    const stableKey =
+      ids[0] ||
+      normalizeId(member?.displayName) ||
+      normalizeId(member?.email) ||
+      Math.random().toString(36).slice(2);
+
+    if (seen.has(stableKey)) continue;
+    seen.add(stableKey);
+
+    const displayName =
+      String(
+        member?.displayName ||
+        member?.user?.displayName ||
+        member?.email ||
+        member?.userPrincipalName ||
+        member?.user?.email ||
+        "Unknown participant"
+      ).trim();
+
+    const secondary =
+      String(
+        member?.email ||
+        member?.user?.email ||
+        member?.userPrincipalName ||
+        member?.upn ||
+        ""
+      ).trim();
+
+    const isMe = ids.some((id) => normalizedMeIds.has(id));
+
+    unique.push({
+      displayName,
+      secondary,
+      isMe,
+    });
+  }
+
+  unique.sort((a, b) => {
+    if (a.isMe !== b.isMe) return a.isMe ? -1 : 1;
+    return a.displayName.localeCompare(b.displayName);
+  });
+
+  let html = `
+    <section class="participantsPanel">
+      <div class="participantsHead">
+        <div class="participantsTitle">Участници в чата</div>
+        <div class="participantsCount">${unique.length} participant${unique.length === 1 ? "" : "s"}</div>
+      </div>
+      <div class="participantsGrid">
+  `;
+
+  for (const p of unique) {
+    const initials = p.displayName
+      .split(/\s+/)
+      .filter(Boolean)
+      .slice(0, 2)
+      .map((x) => x[0] || "")
+      .join("")
+      .toUpperCase() || "?";
+
+    html += `
+      <div class="participantCard ${p.isMe ? "me" : ""}">
+        <div class="participantAvatar">${esc(initials)}</div>
+        <div class="participantMeta">
+          <div class="participantNameRow">
+            <div class="participantName">${esc(p.displayName)}</div>
+            ${p.isMe ? `<span class="participantBadge">You</span>` : ``}
+          </div>
+          ${
+            p.secondary
+              ? `<div class="participantSecondary">${esc(p.secondary)}</div>`
+              : `<div class="participantSecondary empty">—</div>`
+          }
+        </div>
+      </div>
+    `;
+  }
+
+  html += `
+      </div>
+    </section>
+  `;
+
+  return html;
+}
+
 /** =========================
  * EXPORT HTML BUILDER
  * ========================= */
-function buildHtml(items, stats, exportTitle, archiveRange) {
+function buildHtml(items, stats, exportTitle, archiveRange, members, me) {
   const generatedAt = new Date().toLocaleString();
+  const participantsHtml = buildParticipantsPanel(members, me);
 
   const getInitials = (name) => {
     const parts = String(name || "").trim().split(/\s+/).filter(Boolean);
@@ -1805,23 +3357,64 @@ function buildHtml(items, stats, exportTitle, archiveRange) {
 
   let htmlMsgs = "";
   let lastSender = null;
+  let lastMinuteKey = null;
 
-  for (const m of items) {
-    const sameSender = m.sender === lastSender;
+    for (const m of items) {
+    if (m.isSystemEvent) {
+      lastSender = null;
+      lastMinuteKey = null;
+
+      htmlMsgs += `
+        <div class="systemEventRow" id="mid-${esc(m.mid)}" data-mid="${esc(m.mid)}">
+          <div class="systemEventInner">
+            <div class="systemEventBody">${m.bodyHtml || ""}</div>
+            <div class="systemEventTime">${esc(m.dtStr)}</div>
+          </div>
+        </div>
+      `;
+      continue;
+    }
+
+    if (m.isDeletedNotice) {
+      lastSender = null;
+      lastMinuteKey = null;
+
+      const deletedAuthor = getDeletedNoticeAuthorLabel(m.sender);
+
+      htmlMsgs += `
+        <div class="deletedNoticeRow" id="mid-${esc(m.mid)}" data-mid="${esc(m.mid)}">
+          <div class="deletedNoticeInner">
+            <div class="deletedNoticeAuthor">${esc(deletedAuthor)}</div>
+            <div class="deletedNoticeBody">${m.bodyHtml || ""}</div>
+            <div class="deletedNoticeTime">${esc(m.dtStr)}</div>
+          </div>
+        </div>
+      `;
+      continue;
+    }
+
+    const currentMinuteKey = getMessageMinuteKey(m.dtMs, m.dtStr);
+    const sameSenderSameMinute =
+      m.sender === lastSender &&
+      currentMinuteKey &&
+      lastMinuteKey &&
+      currentMinuteKey === lastMinuteKey;
+
     lastSender = m.sender;
+    lastMinuteKey = currentMinuteKey || null;
 
     htmlMsgs += `
       <div class="msgRow ${m.isMe ? "me" : "other"}" id="mid-${esc(m.mid)}" data-mid="${esc(m.mid)}">
-        <div class="avatar ${sameSender ? "ghost" : ""}">${esc(getInitials(m.sender))}</div>
+        <div class="avatar ${sameSenderSameMinute ? "ghost" : ""}">${esc(getInitials(m.sender))}</div>
         <div class="bubbleWrap">
-          <div class="msgHead ${sameSender ? "compact" : ""}">
+          <div class="msgHead ${sameSenderSameMinute ? "compact" : ""}">
             <div class="senderLine">
-              ${sameSender ? "" : `<span class="sender">${esc(m.sender)}</span>`}
+              ${sameSenderSameMinute ? "" : `<span class="sender">${esc(m.sender)}</span>`}
             </div>
             <div class="time">${esc(m.dtStr)}</div>
           </div>
-          <div class="bubble">
-            <div class="body">
+          <div class="bubble ${m.isEmojiOnly ? "emojiOnlyBubble" : ""}">
+            <div class="body ${m.isEmojiOnly ? "emojiOnlyBody" : ""}">
               ${m.forwardHtml || ""}
               ${m.quoteHtml || ""}
               ${m.bodyHtml || ""}
@@ -1905,6 +3498,52 @@ function buildHtml(items, stats, exportTitle, archiveRange) {
   }
   .btn:hover{ background: rgba(255,255,255,.06); }
 
+  .deletedNoticeRow{
+    display:flex;
+    justify-content:center;
+    padding:6px 0 4px 0;
+  }
+
+  .deletedNoticeInner{
+    max-width:760px;
+    text-align:center;
+    padding:0;
+  }
+
+  .deletedNoticeAuthor{
+    margin-bottom:6px;
+    color:rgba(229,231,235,.92);
+    font-size:12px;
+    font-weight:1000;
+    line-height:1.3;
+  }
+
+  .deletedNoticeBody{
+    display:inline-flex;
+    align-items:center;
+    gap:8px;
+    padding:9px 14px;
+    border-radius:10px;
+    background:rgba(124,58,237,.18);
+    border:1px solid rgba(124,58,237,.28);
+    color:#f3f4f6;
+    font-size:13px;
+    line-height:1.45;
+    font-style:italic;
+    font-weight:800;
+  }
+
+  .deletedNoticeText{
+    display:inline;
+  }
+
+  .deletedNoticeTime{
+    margin-top:6px;
+    color:var(--muted);
+    font-size:11px;
+    font-weight:900;
+  }
+
   .chatScroller{
     height: calc(100vh - 70px);
     overflow:auto;
@@ -1927,6 +3566,24 @@ function buildHtml(items, stats, exportTitle, archiveRange) {
     border:1px solid var(--line);
     user-select:none;
     flex:0 0 auto;
+  }
+
+    .emojiOnlyBubble{
+    padding:12px 16px;
+  }
+
+  .emojiOnlyBody{
+    font-size:36px;
+    line-height:1.2;
+    text-align:left;
+  }
+
+  .emojiOnlyBody > div,
+  .emojiOnlyBody > p,
+  .emojiOnlyBody > span{
+    font-size:inherit;
+    line-height:inherit;
+    margin:0;
   }
   .avatar.ghost{ visibility:hidden; }
   .bubbleWrap{ flex:1; min-width:0; }
@@ -1965,27 +3622,367 @@ function buildHtml(items, stats, exportTitle, archiveRange) {
     margin:8px 0;
   }
 
-  .attachmentCard{
-    display:flex; align-items:center; gap:12px;
-    padding:10px 12px; border-radius:14px; margin-top:10px;
-    border:1px solid var(--line); background: rgba(255,255,255,.04);
-    max-width:780px;
+  .fileWarning{
+  border:1px solid rgba(255,120,120,.3);
+  background:rgba(255,120,120,.08);
+}
+
+.fileWarningText{
+  font-size:12px;
+  color:#fca5a5;
+  margin-top:4px;
+}
+
+  .systemEventRow{
+    display:flex;
+    justify-content:center;
+    padding:6px 0 4px 0;
   }
-  .attachmentCard.embedded{ background: rgba(37,99,235,.10); border-color: rgba(37,99,235,.25); }
-  .attachmentCard.missingLocal{ background: rgba(239,68,68,.08); border-color: rgba(239,68,68,.20); }
-  .attIcon{font-size:18px; flex-shrink:0;}
+
+  .systemEventInner{
+    max-width:760px;
+    text-align:center;
+    padding:4px 14px;
+  }
+
+  .systemEventBody{
+    color:rgba(229,231,235,.78);
+    font-size:13px;
+    line-height:1.55;
+    font-weight:700;
+  }
+
+  .systemEventText{
+    display:inline;
+  }
+
+  .systemEventTime{
+    margin-top:6px;
+    color:var(--muted);
+    font-size:11px;
+    font-weight:900;
+  }
+
+    .attachmentCard{
+    display:flex;
+    align-items:center;
+    gap:12px;
+    padding:10px 12px;
+    border-radius:14px;
+    margin-top:10px;
+    border:1px solid var(--line);
+    background: rgba(255,255,255,.04);
+    max-width:900px;
+  }
+  .attachmentCard.embedded{
+    background: rgba(37,99,235,.10);
+    border-color: rgba(37,99,235,.25);
+  }
+  .attachmentCard.missingLocal{
+    background: rgba(239,68,68,.08);
+    border-color: rgba(239,68,68,.20);
+  }
+  .attIcon{
+    font-size:18px;
+    flex-shrink:0;
+  }
+  .attMain{
+    flex:1;
+    min-width:0;
+  }
   .attName{
-    flex:1; min-width:0; font-weight:1000; font-size:13px;
-    white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+    min-width:0;
+    font-weight:1000;
+    font-size:13px;
+    white-space:nowrap;
+    overflow:hidden;
+    text-overflow:ellipsis;
   }
-  .attDownload{
-    font-size:12px; font-weight:1000; text-decoration:none; color:var(--text);
-    padding:7px 10px; border-radius:12px; border:1px solid var(--line);
-    background: rgba(0,0,0,.25); white-space:nowrap;
+  .attMeta{
+    margin-top:4px;
+    font-size:11px;
+    color:var(--muted);
+    font-weight:900;
+    line-height:1.3;
+    word-break:break-word;
   }
-  .attDownload:hover{ background: rgba(255,255,255,.06); }
-  .attMissing{ font-size:12px; color:#fecaca; font-weight:1000; white-space:nowrap; }
-  .attMeta{ font-size:11px; color:var(--muted); font-weight:900; white-space:nowrap; }
+  .attActions{
+    display:flex;
+    gap:8px;
+    align-items:center;
+    flex-wrap:wrap;
+    flex-shrink:0;
+  }
+  .attDownload,
+  .attPreviewBtn{
+    font-size:12px;
+    font-weight:1000;
+    text-decoration:none;
+    color:var(--text);
+    padding:7px 10px;
+    border-radius:12px;
+    border:1px solid var(--line);
+    background: rgba(0,0,0,.25);
+    white-space:nowrap;
+    cursor:pointer;
+  }
+  .attDownload:hover,
+  .attPreviewBtn:hover{
+    background: rgba(255,255,255,.06);
+  }
+  .attMissing{
+    margin-top:4px;
+    font-size:12px;
+    color:#fecaca;
+    font-weight:1000;
+    line-height:1.4;
+    word-break:break-word;
+  }
+
+    .filePreviewBackdrop{
+    position:fixed;
+    inset:0;
+    background:rgba(0,0,0,.55);
+    opacity:0;
+    pointer-events:none;
+    transition:opacity .2s ease;
+    z-index:99992;
+  }
+
+  .filePreviewBackdrop.open{
+    opacity:1;
+    pointer-events:auto;
+  }
+
+  .filePreviewModal{
+    position:fixed;
+    inset:24px;
+    max-width:min(1400px, calc(100vw - 48px));
+    max-height:calc(100vh - 48px);
+    margin:auto;
+    display:flex;
+    flex-direction:column;
+    background:rgba(11,18,32,.98);
+    border:1px solid rgba(255,255,255,.10);
+    border-radius:18px;
+    box-shadow:0 30px 70px rgba(0,0,0,.45);
+    transform:scale(.98);
+    opacity:0;
+    pointer-events:none;
+    transition:transform .2s ease, opacity .2s ease;
+    z-index:99993;
+    overflow:hidden;
+  }
+
+  .filePreviewModal.open{
+    transform:scale(1);
+    opacity:1;
+    pointer-events:auto;
+  }
+
+  .filePreviewHead{
+    display:flex;
+    justify-content:space-between;
+    align-items:flex-start;
+    gap:12px;
+    padding:16px 18px 14px 18px;
+    border-bottom:1px solid rgba(255,255,255,.08);
+    background:rgba(255,255,255,.03);
+  }
+
+  .filePreviewTitle{
+    font-size:15px;
+    font-weight:1000;
+    line-height:1.25;
+    word-break:break-word;
+  }
+
+  .filePreviewSub{
+    margin-top:6px;
+    color:var(--muted);
+    font-size:12px;
+    line-height:1.4;
+    word-break:break-word;
+  }
+
+  .filePreviewClose{
+    flex-shrink:0;
+  }
+
+  .filePreviewBody{
+    flex:1;
+    min-height:0;
+    overflow:auto;
+    padding:16px;
+    background:rgba(255,255,255,.02);
+  }
+
+  .filePreviewFrame,
+  .filePreviewObject{
+    width:100%;
+    min-height:72vh;
+    border:none;
+    border-radius:14px;
+    background:#0b0f19;
+  }
+
+  .filePreviewImage{
+    display:block;
+    max-width:100%;
+    max-height:72vh;
+    margin:0 auto;
+    border-radius:14px;
+    border:1px solid rgba(255,255,255,.08);
+    background:#0b0f19;
+  }
+
+  .filePreviewText{
+    margin:0;
+    padding:16px;
+    border-radius:14px;
+    border:1px solid rgba(255,255,255,.08);
+    background:#111827;
+    color:#e5e7eb;
+    font:13px/1.55 Consolas, "Cascadia Mono", "Courier New", monospace;
+    white-space:pre-wrap;
+    word-break:break-word;
+    overflow:auto;
+  }
+
+  .filePreviewMedia{
+    width:100%;
+    max-height:72vh;
+    border-radius:14px;
+    background:#000;
+  }
+
+  .filePreviewUnsupported{
+    max-width:760px;
+    margin:0 auto;
+    padding:18px;
+    border-radius:16px;
+    border:1px solid rgba(255,255,255,.10);
+    background:rgba(255,255,255,.04);
+  }
+
+  .filePreviewUnsupportedTitle{
+    font-size:15px;
+    font-weight:1000;
+    margin-bottom:8px;
+  }
+
+  .filePreviewUnsupportedText{
+    color:var(--muted);
+    font-size:13px;
+    line-height:1.55;
+    margin-bottom:14px;
+  }
+
+  .filePreviewActions{
+    display:flex;
+    gap:10px;
+    flex-wrap:wrap;
+  }
+
+    .imageZoomBackdrop{
+    position:fixed;
+    inset:0;
+    background:rgba(0,0,0,.72);
+    opacity:0;
+    pointer-events:none;
+    transition:opacity .2s ease;
+    z-index:99994;
+  }
+
+  .imageZoomBackdrop.open{
+    opacity:1;
+    pointer-events:auto;
+  }
+
+  .imageZoomModal{
+    position:fixed;
+    inset:24px;
+    max-width:min(1500px, calc(100vw - 48px));
+    max-height:calc(100vh - 48px);
+    margin:auto;
+    display:flex;
+    flex-direction:column;
+    background:rgba(11,18,32,.98);
+    border:1px solid rgba(255,255,255,.10);
+    border-radius:18px;
+    box-shadow:0 30px 70px rgba(0,0,0,.50);
+    transform:scale(.985);
+    opacity:0;
+    pointer-events:none;
+    transition:transform .2s ease, opacity .2s ease;
+    z-index:99995;
+    overflow:hidden;
+  }
+
+  .imageZoomModal.open{
+    transform:scale(1);
+    opacity:1;
+    pointer-events:auto;
+  }
+
+  .imageZoomHead{
+    display:flex;
+    justify-content:space-between;
+    align-items:flex-start;
+    gap:12px;
+    padding:16px 18px 14px 18px;
+    border-bottom:1px solid rgba(255,255,255,.08);
+    background:rgba(255,255,255,.03);
+  }
+
+  .imageZoomTitle{
+    font-size:15px;
+    font-weight:1000;
+    line-height:1.25;
+    word-break:break-word;
+  }
+
+  .imageZoomSub{
+    margin-top:6px;
+    color:var(--muted);
+    font-size:12px;
+    line-height:1.4;
+    word-break:break-word;
+  }
+
+  .imageZoomBody{
+    flex:1;
+    min-height:0;
+    overflow:auto;
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    padding:8px;
+    background:rgba(255,255,255,.02);
+  }
+
+  .imageZoomImg{
+    display:block;
+    max-width:calc(100vw - 40px);
+    max-height:calc(100vh - 40px);
+    width:auto;
+    height:auto;
+    object-fit:contain;
+    border-radius:12px;
+    border:1px solid rgba(255,255,255,.08);
+    background:#0b0f19;
+    box-shadow:0 30px 80px rgba(0,0,0,.5);
+  }
+
+  .imageZoomClose{
+    flex-shrink:0;
+  }
+
+  .body img,
+  .fwdInner img,
+  .quotePreview img{
+    cursor:zoom-in;
+  }
 
   .reactions{ display:flex; gap:6px; flex-wrap:wrap; margin-top:10px; }
   .reactChip{
@@ -2061,6 +4058,117 @@ function buildHtml(items, stats, exportTitle, archiveRange) {
     font-style:italic;
   }
 
+    .participantsPanel{
+    margin: 0 0 14px 0;
+    padding: 14px 16px;
+    border-radius: 18px;
+    border: 1px solid var(--line);
+    background: linear-gradient(180deg, rgba(255,255,255,.05), rgba(255,255,255,.03));
+    box-shadow: 0 18px 40px rgba(0,0,0,.18);
+  }
+
+  .participantsHead{
+    display:flex;
+    justify-content:space-between;
+    align-items:center;
+    gap:12px;
+    flex-wrap:wrap;
+    margin-bottom:12px;
+  }
+
+  .participantsTitle{
+    font-size:14px;
+    font-weight:1000;
+    letter-spacing:.01em;
+  }
+
+  .participantsCount{
+    color:var(--muted);
+    font-size:12px;
+    font-weight:900;
+    padding:5px 10px;
+    border-radius:999px;
+    border:1px solid var(--line);
+    background:rgba(0,0,0,.20);
+  }
+
+  .participantsGrid{
+    display:grid;
+    grid-template-columns:repeat(auto-fit, minmax(240px, 1fr));
+    gap:10px;
+  }
+
+  .participantCard{
+    display:flex;
+    align-items:flex-start;
+    gap:12px;
+    padding:12px 13px;
+    border-radius:14px;
+    border:1px solid rgba(255,255,255,.08);
+    background:rgba(255,255,255,.035);
+  }
+
+  .participantCard.me{
+    background:rgba(37,99,235,.10);
+    border-color:rgba(37,99,235,.24);
+  }
+
+  .participantAvatar{
+    width:38px;
+    height:38px;
+    border-radius:999px;
+    display:grid;
+    place-items:center;
+    flex:0 0 auto;
+    font-size:12px;
+    font-weight:1000;
+    border:1px solid rgba(255,255,255,.10);
+    background:rgba(255,255,255,.08);
+  }
+
+  .participantMeta{
+    min-width:0;
+    flex:1;
+  }
+
+  .participantNameRow{
+    display:flex;
+    align-items:center;
+    gap:8px;
+    flex-wrap:wrap;
+  }
+
+  .participantName{
+    font-size:13px;
+    font-weight:1000;
+    line-height:1.25;
+    word-break:break-word;
+  }
+
+  .participantBadge{
+    display:inline-flex;
+    align-items:center;
+    padding:3px 8px;
+    border-radius:999px;
+    font-size:11px;
+    font-weight:1000;
+    color:#dbeafe;
+    background:rgba(37,99,235,.18);
+    border:1px solid rgba(37,99,235,.30);
+  }
+
+  .participantSecondary{
+    margin-top:5px;
+    color:var(--muted);
+    font-size:12px;
+    line-height:1.35;
+    word-break:break-word;
+  }
+
+  .participantSecondary.empty{
+    opacity:.55;
+  }
+
   .msgRow.me{ flex-direction:row-reverse; }
   .msgRow.me .msgHead{ flex-direction:row-reverse; }
 
@@ -2092,6 +4200,88 @@ function buildHtml(items, stats, exportTitle, archiveRange) {
     font-weight:1000;
     font-size:11px;
   }
+
+    .drawerBackdrop{
+    position:fixed;
+    inset:0;
+    background:rgba(0,0,0,.45);
+    opacity:0;
+    pointer-events:none;
+    transition:opacity .22s ease;
+    z-index:99990;
+  }
+
+  .drawerBackdrop.open{
+    opacity:1;
+    pointer-events:auto;
+  }
+
+  .participantsDrawer{
+    position:fixed;
+    top:0;
+    right:0;
+    width:min(420px, 92vw);
+    height:100vh;
+    background:rgba(11,18,32,.98);
+    border-left:1px solid rgba(255,255,255,.10);
+    box-shadow:-20px 0 50px rgba(0,0,0,.35);
+    transform:translateX(100%);
+    transition:transform .24s ease;
+    z-index:99991;
+    display:flex;
+    flex-direction:column;
+  }
+
+  .participantsDrawer.open{
+    transform:translateX(0);
+  }
+
+  .participantsDrawerHead{
+    display:flex;
+    justify-content:space-between;
+    align-items:flex-start;
+    gap:12px;
+    padding:18px 18px 14px 18px;
+    border-bottom:1px solid rgba(255,255,255,.08);
+    background:rgba(255,255,255,.03);
+    backdrop-filter:blur(8px);
+  }
+
+  .participantsDrawerTitle{
+    font-size:16px;
+    font-weight:1000;
+    line-height:1.2;
+  }
+
+  .participantsDrawerSub{
+    margin-top:6px;
+    color:var(--muted);
+    font-size:12px;
+    line-height:1.4;
+  }
+
+  .participantsDrawerBody{
+    flex:1;
+    overflow:auto;
+    padding:16px;
+  }
+
+  .drawerCloseBtn{
+    padding:8px 12px;
+    min-width:auto;
+  }
+
+  .participantsDrawer .participantsPanel{
+    margin:0;
+    padding:0;
+    border:none;
+    background:transparent;
+    box-shadow:none;
+  }
+
+  .participantsDrawer .participantsHead{
+    margin-bottom:14px;
+  }
   .reactPopover .pName{ font-weight:1000; }
 </style>
 </head>
@@ -2104,30 +4294,97 @@ function buildHtml(items, stats, exportTitle, archiveRange) {
         <span class="pill">Период: ${esc(archiveRange?.label || "—")}</span>
         <span class="pill">Генериран: ${esc(generatedAt)}</span>
         <span class="pill">Снимки: ${stats.imagesEmbedded || 0} embedded • ${((stats.imagesBytes || 0) / 1024 / 1024).toFixed(1)} MB</span>
-        <span class="pill">Файлове: ${stats.attachEmbedded || 0} embedded • ${((stats.attachBytes || 0) / 1024 / 1024).toFixed(1)} MB</span>
+                <span class="pill">
+          Файлове:
+          • ${stats.attachEmbedded || 0} embedded • ${esc(formatBytesToMB(stats.attachBytes || 0) || "0.00 MB")}
+        </span>
       </div>
     </div>
     <div class="actions">
+      <button class="btn" id="btnParticipants">👥 Participants</button>
       <button class="btn" id="btnBottom">⬇ Най-нови</button>
     </div>
   </div>
 
-  <div class="chatScroller" id="chatScroller">
-    <div class="chatInner" id="chatInner">${htmlMsgs}</div>
-  </div>
+    <div class="chatScroller" id="chatScroller">
+      <div class="chatInner" id="chatInner">
+        ${htmlMsgs}
+      </div>
+    </div>
 
-  <div class="reactPopover" id="reactPopover" role="dialog" aria-modal="false">
-    <div class="tTitle" id="rpTitle">Реакции</div>
-    <div id="rpList"></div>
-  </div>
+    <div class="drawerBackdrop" id="drawerBackdrop"></div>
+
+    <aside class="participantsDrawer" id="participantsDrawer" aria-hidden="true">
+      <div class="participantsDrawerHead">
+        <div>
+          <div class="participantsDrawerTitle">Участници в чата</div>
+          <div class="participantsDrawerSub">Хората, които са част от този разговор</div>
+        </div>
+        <button class="btn drawerCloseBtn" id="btnCloseParticipants">✕</button>
+      </div>
+
+      <div class="participantsDrawerBody">
+        ${participantsHtml}
+      </div>
+    </aside>
+
+    <div class="reactPopover" id="reactPopover" role="dialog" aria-modal="false">
+      <div class="tTitle" id="rpTitle">Реакции</div>
+      <div id="rpList"></div>
+    </div>
+
+        <div class="filePreviewBackdrop" id="filePreviewBackdrop"></div>
+
+    <section class="filePreviewModal" id="filePreviewModal" aria-hidden="true">
+      <div class="filePreviewHead">
+        <div>
+          <div class="filePreviewTitle" id="filePreviewTitle">File preview</div>
+          <div class="filePreviewSub" id="filePreviewSub">Offline preview</div>
+        </div>
+        <button class="btn filePreviewClose" id="btnCloseFilePreview">✕</button>
+      </div>
+      <div class="filePreviewBody" id="filePreviewBody"></div>
+    </section>
+
+        <div class="imageZoomBackdrop" id="imageZoomBackdrop"></div>
+
+    <section class="imageZoomModal" id="imageZoomModal" aria-hidden="true">
+      <div class="imageZoomHead">
+        <div>
+          <div class="imageZoomTitle" id="imageZoomTitle">Image preview</div>
+          <div class="imageZoomSub" id="imageZoomSub">Натисни Esc или извън прозореца, за да затвориш</div>
+        </div>
+        <button class="btn imageZoomClose" id="btnCloseImageZoom">✕</button>
+      </div>
+      <div class="imageZoomBody" id="imageZoomBody"></div>
+    </section>
 
 <script>
 (function(){
   const sc = document.getElementById("chatScroller");
   const btn = document.getElementById("btnBottom");
+  const btnParticipants = document.getElementById("btnParticipants");
+  const btnCloseParticipants = document.getElementById("btnCloseParticipants");
+  const participantsDrawer = document.getElementById("participantsDrawer");
+  const drawerBackdrop = document.getElementById("drawerBackdrop");
+
   const pop = document.getElementById("reactPopover");
   const list = document.getElementById("rpList");
   const title = document.getElementById("rpTitle");
+
+  const filePreviewModal = document.getElementById("filePreviewModal");
+  const filePreviewBackdrop = document.getElementById("filePreviewBackdrop");
+  const filePreviewTitle = document.getElementById("filePreviewTitle");
+  const filePreviewSub = document.getElementById("filePreviewSub");
+  const filePreviewBody = document.getElementById("filePreviewBody");
+  const btnCloseFilePreview = document.getElementById("btnCloseFilePreview");
+
+  const imageZoomModal = document.getElementById("imageZoomModal");
+  const imageZoomBackdrop = document.getElementById("imageZoomBackdrop");
+  const imageZoomTitle = document.getElementById("imageZoomTitle");
+  const imageZoomSub = document.getElementById("imageZoomSub");
+  const imageZoomBody = document.getElementById("imageZoomBody");
+  const btnCloseImageZoom = document.getElementById("btnCloseImageZoom");
 
   if (sc && btn) {
     const toBottom = () => { sc.scrollTop = sc.scrollHeight; };
@@ -2135,157 +4392,465 @@ function buildHtml(items, stats, exportTitle, archiveRange) {
     btn.addEventListener("click", toBottom);
   }
 
-  if (!pop || !list || !title) return;
-
-  let activeChip = null;
-  let hideTimer = null;
-
-  const initials = (name) => {
-    const parts = String(name || "").trim().split(/\s+/).filter(Boolean);
-    const a = parts[0]?.[0] || "?";
-    const b = parts[1]?.[0] || "";
-    return (a + b).toUpperCase();
+  const openDrawer = () => {
+    if (!participantsDrawer || !drawerBackdrop) return;
+    participantsDrawer.classList.add("open");
+    drawerBackdrop.classList.add("open");
+    participantsDrawer.setAttribute("aria-hidden", "false");
   };
 
-  const parseNames = (chip) => {
-    const raw = (chip.getAttribute("data-names") || "").trim();
-    if (!raw) return [];
-    return raw.split("|").map(s => s.trim()).filter(Boolean);
+  const closeDrawer = () => {
+    if (!participantsDrawer || !drawerBackdrop) return;
+    participantsDrawer.classList.remove("open");
+    drawerBackdrop.classList.remove("open");
+    participantsDrawer.setAttribute("aria-hidden", "true");
   };
 
-  const getEmoji = (chip) => {
-    return chip.getAttribute("data-emoji") ||
-      chip.querySelector(".e")?.textContent?.trim() ||
-      "👍";
-  };
+  btnParticipants?.addEventListener("click", openDrawer);
+  btnCloseParticipants?.addEventListener("click", closeDrawer);
+  drawerBackdrop?.addEventListener("click", closeDrawer);
 
-  const getCount = (chip) => {
-    return chip.getAttribute("data-count") ||
-      chip.querySelector(".c")?.textContent?.trim() ||
-      "0";
-  };
+  function getExt(fileName) {
+    const m = String(fileName || "").toLowerCase().match(/\.([a-z0-9]{1,12})$/);
+    return m ? m[1] : "";
+  }
 
-  const position = (chip) => {
-    const rect = chip.getBoundingClientRect();
-    pop.style.display = "block";
+  function isTextLikeMime(mime) {
+    const m = String(mime || "").toLowerCase();
+    return (
+      m.startsWith("text/") ||
+      m.includes("json") ||
+      m.includes("xml") ||
+      m.includes("javascript") ||
+      m.includes("ecmascript") ||
+      m.includes("yaml")
+    );
+  }
 
-    const w = pop.offsetWidth;
-    const h = pop.offsetHeight;
+    function getPreviewKind(fileName, mime) {
+    const ext = getExt(fileName);
+    const m = String(mime || "").toLowerCase();
 
-    let left = window.scrollX + rect.left;
-    let top = window.scrollY + rect.bottom + 10;
+    const officeLikeExt = [
+      "doc", "docx", "docm",
+      "xls", "xlsx", "xlsm", "xlsb",
+      "ppt", "pptx", "pptm",
+      "msg", "rtf", "odt", "ods", "odp"
+    ];
 
-    if (left + w > window.scrollX + window.innerWidth - 12) {
-      left = window.scrollX + window.innerWidth - w - 12;
-    }
-    if (left < window.scrollX + 12) {
-      left = window.scrollX + 12;
-    }
+    const spreadsheetTextExt = ["csv", "tsv"];
 
-    if (top + h > window.scrollY + window.innerHeight - 12) {
-      top = window.scrollY + rect.top - h - 10;
-    }
+    const officeLikeMimeHints = [
+      "application/vnd.openxmlformats-officedocument",
+      "application/vnd.ms-excel",
+      "application/vnd.ms-powerpoint",
+      "application/msword",
+      "application/vnd.oasis.opendocument",
+      "application/vnd.ms-outlook",
+      "officedocument",
+      "spreadsheetml",
+      "wordprocessingml",
+      "presentationml"
+    ];
 
-    if (top < window.scrollY + 12) {
-      top = window.scrollY + 12;
-    }
+    if (m.startsWith("image/")) return "image";
+    if (m === "application/pdf" || ext === "pdf") return "pdf";
+    if (m.startsWith("audio/")) return "audio";
+    if (m.startsWith("video/")) return "video";
 
-    pop.style.left = left + "px";
-    pop.style.top = top + "px";
-  };
+    if (spreadsheetTextExt.includes(ext)) return "text";
 
-  const renderList = (chip) => {
-    const emoji = getEmoji(chip);
-    const count = getCount(chip);
-    const names = parseNames(chip);
+    if (officeLikeExt.includes(ext)) return "unsupported";
+    if (officeLikeMimeHints.some((hint) => m.includes(hint))) return "unsupported";
 
-    const reactionType = chip.getAttribute("data-reaction-type") || emoji;
-title.textContent = emoji + " " + count + " reaction" + (count === "1" ? "" : "s") + " • " + reactionType;
-    list.innerHTML = "";
-
-    if (!names.length) {
-      const row = document.createElement("div");
-      row.className = "tItem";
-
-      const av = document.createElement("div");
-      av.className = "pAvatar";
-      av.textContent = emoji;
-
-      const nm = document.createElement("div");
-      nm.className = "pName";
-      nm.textContent = "No participant names available";
-
-      row.appendChild(av);
-      row.appendChild(nm);
-      list.appendChild(row);
-      return;
+    if (
+      isTextLikeMime(m) ||
+      ["txt","md","json","log","xml","html","htm","css","js","ts","yaml","yml","ini","conf","config","sql"].includes(ext)
+    ) {
+      return "text";
     }
 
-    for (const n of names.slice(0, 100)) {
-      const row = document.createElement("div");
-      row.className = "tItem";
+    if (["svg"].includes(ext)) return "image";
+    if (["mht","mhtml"].includes(ext)) return "iframe";
 
-      const av = document.createElement("div");
-      av.className = "pAvatar";
-      av.textContent = initials(n);
+    if (m.startsWith("application/")) return "iframe";
+    return "unsupported";
+  }
 
-      const nm = document.createElement("div");
-      nm.className = "pName";
-      nm.textContent = n;
+    function base64ToBytes(base64) {
+    const bin = atob(base64);
+    const bytes = new Uint8Array(bin.length);
 
-      row.appendChild(av);
-      row.appendChild(nm);
-      list.appendChild(row);
+    for (let i = 0; i < bin.length; i++) {
+      bytes[i] = bin.charCodeAt(i);
     }
-  };
 
-  const show = (chip) => {
-    clearTimeout(hideTimer);
-    activeChip = chip;
-    renderList(chip);
-    position(chip);
-  };
+    return bytes;
+  }
 
-  const hide = () => {
-    clearTimeout(hideTimer);
-    hideTimer = setTimeout(() => {
-      pop.style.display = "none";
-      activeChip = null;
-    }, 140);
-  };
+  function latin1FallbackFromBytes(bytes) {
+    let out = "";
+    const chunk = 0x8000;
 
-  document.addEventListener("mouseover", (e) => {
-    const chip = e.target?.closest?.(".reactChip");
-    if (!chip) return;
-    show(chip);
-  }, true);
+    for (let i = 0; i < bytes.length; i += chunk) {
+      out += String.fromCharCode(...bytes.slice(i, i + chunk));
+    }
 
-  document.addEventListener("mouseout", (e) => {
-    const chip = e.target?.closest?.(".reactChip");
-    if (!chip) return;
-    hide();
-  }, true);
+    return out;
+  }
 
-  pop.addEventListener("mouseenter", () => {
-    clearTimeout(hideTimer);
+  function decodeBytesToText(bytes) {
+    if (!bytes || !bytes.length) return "";
+
+    try {
+      return new TextDecoder("utf-8", { fatal: false }).decode(bytes);
+    } catch {}
+
+    try {
+      return new TextDecoder("utf-8").decode(bytes);
+    } catch {}
+
+    return latin1FallbackFromBytes(bytes);
+  }
+
+  function dataUrlToText(dataUrl) {
+    const s = String(dataUrl || "");
+    const commaIndex = s.indexOf(",");
+    if (commaIndex < 0) return "";
+
+    const header = s.slice(0, commaIndex);
+    const headerLower = header.toLowerCase();
+    const payload = s.slice(commaIndex + 1);
+
+    try {
+      if (headerLower.includes(";base64")) {
+        const bytes = base64ToBytes(payload);
+        return decodeBytesToText(bytes);
+      }
+
+      const decoded = decodeURIComponent(payload);
+
+      // Convert JS string to UTF-8 bytes and normalize through TextDecoder
+      const bytes = new TextEncoder().encode(decoded);
+      return decodeBytesToText(bytes);
+    } catch {
+      try {
+        return decodeURIComponent(payload);
+      } catch {
+        return "Preview decode failed.";
+      }
+    }
+  }
+
+  function clearFilePreview() {
+    if (!filePreviewBody) return;
+    filePreviewBody.innerHTML = "";
+  }
+
+  function openFilePreview(name, mime, dataUrl) {
+    if (!filePreviewModal || !filePreviewBackdrop || !filePreviewBody) return;
+
+    const kind = getPreviewKind(name, mime);
+
+    filePreviewTitle.textContent = name || "File preview";
+    filePreviewSub.textContent = (mime || "application/octet-stream") + " • " + kind;
+    clearFilePreview();
+
+    if (kind === "image") {
+      const img = document.createElement("img");
+      img.className = "filePreviewImage";
+      img.alt = name || "image preview";
+      img.src = dataUrl;
+      filePreviewBody.appendChild(img);
+    } else if (kind === "pdf") {
+      const frame = document.createElement("iframe");
+      frame.className = "filePreviewFrame";
+      frame.src = dataUrl;
+      frame.setAttribute("title", name || "PDF preview");
+      filePreviewBody.appendChild(frame);
+    } else if (kind === "audio") {
+      const audio = document.createElement("audio");
+      audio.className = "filePreviewMedia";
+      audio.controls = true;
+      audio.src = dataUrl;
+      filePreviewBody.appendChild(audio);
+    } else if (kind === "video") {
+      const video = document.createElement("video");
+      video.className = "filePreviewMedia";
+      video.controls = true;
+      video.src = dataUrl;
+      filePreviewBody.appendChild(video);
+    } else if (kind === "text") {
+      const pre = document.createElement("pre");
+      pre.className = "filePreviewText";
+      pre.textContent = dataUrlToText(dataUrl);
+      filePreviewBody.appendChild(pre);
+    } else if (kind === "iframe") {
+      const frame = document.createElement("iframe");
+      frame.className = "filePreviewFrame";
+      frame.src = dataUrl;
+      frame.setAttribute("title", name || "File preview");
+      filePreviewBody.appendChild(frame);
+    } else {
+      const wrap = document.createElement("div");
+      wrap.className = "filePreviewUnsupported";
+
+      const t = document.createElement("div");
+      t.className = "filePreviewUnsupportedTitle";
+      t.textContent = "Прегледът не се поддържа офлайн за този файлов тип";
+
+      const p = document.createElement("div");
+      p.className = "filePreviewUnsupportedText";
+            const typeInfo = document.createElement("div");
+      typeInfo.className = "filePreviewUnsupportedText";
+      typeInfo.textContent = "Тип файл: " + (mime || "application/octet-stream");
+            p.textContent = "Файлът е вграден в архива и може да бъде свален локално, но този файлов тип не може да бъде визуализиран надеждно директно от браузъра в офлайн режим.";
+
+      const actions = document.createElement("div");
+      actions.className = "filePreviewActions";
+
+      const dl = document.createElement("a");
+      dl.className = "attDownload";
+      dl.href = dataUrl;
+      dl.download = name || "file";
+      dl.textContent = "Свали офлайн";
+
+      actions.appendChild(dl);
+      wrap.appendChild(t);
+      wrap.appendChild(p);
+      wrap.appendChild(typeInfo);
+      wrap.appendChild(actions);
+      filePreviewBody.appendChild(wrap);
+    }
+
+    filePreviewModal.classList.add("open");
+    filePreviewBackdrop.classList.add("open");
+    filePreviewModal.setAttribute("aria-hidden", "false");
+  }
+
+  function closeFilePreview() {
+    if (!filePreviewModal || !filePreviewBackdrop) return;
+    filePreviewModal.classList.remove("open");
+    filePreviewBackdrop.classList.remove("open");
+    filePreviewModal.setAttribute("aria-hidden", "true");
+    clearFilePreview();
+  }
+
+    function clearImageZoom() {
+    if (!imageZoomBody) return;
+    imageZoomBody.innerHTML = "";
+  }
+
+  function openImageZoom(src, alt) {
+    if (!imageZoomModal || !imageZoomBackdrop || !imageZoomBody) return;
+    if (!src) return;
+
+    clearImageZoom();
+
+    const img = document.createElement("img");
+    img.className = "imageZoomImg";
+    img.src = src;
+    img.alt = alt || "image preview";
+
+    imageZoomTitle.textContent = alt || "Image preview";
+    imageZoomSub.textContent = "Натисни Esc или извън прозореца, за да затвориш";
+
+    imageZoomBody.appendChild(img);
+    imageZoomModal.classList.add("open");
+    imageZoomBackdrop.classList.add("open");
+    imageZoomModal.setAttribute("aria-hidden", "false");
+  }
+
+  function closeImageZoom() {
+    if (!imageZoomModal || !imageZoomBackdrop) return;
+    imageZoomModal.classList.remove("open");
+    imageZoomBackdrop.classList.remove("open");
+    imageZoomModal.setAttribute("aria-hidden", "true");
+    clearImageZoom();
+  }
+
+  btnCloseFilePreview?.addEventListener("click", closeFilePreview);
+  filePreviewBackdrop?.addEventListener("click", closeFilePreview);
+
+  document.addEventListener("click", (e) => {
+    const btn = e.target?.closest?.(".attPreviewBtn");
+    if (!btn) return;
+
+    const dataUrl = btn.getAttribute("data-file-url") || "";
+    const fileName = btn.getAttribute("data-file-name") || "File";
+    const mime = btn.getAttribute("data-file-mime") || "application/octet-stream";
+
+    if (!dataUrl.startsWith("data:")) return;
+    openFilePreview(fileName, mime, dataUrl);
   });
 
-  pop.addEventListener("mouseleave", () => {
-    hide();
+    btnCloseImageZoom?.addEventListener("click", closeImageZoom);
+  imageZoomBackdrop?.addEventListener("click", closeImageZoom);
+
+  document.addEventListener("click", (e) => {
+    const img = e.target?.closest?.(".body img, .fwdInner img, .quotePreview img");
+    if (!img) return;
+
+    const src = img.getAttribute("src") || "";
+    const alt = img.getAttribute("alt") || "Image preview";
+
+    if (!src) return;
+    openImageZoom(src, alt);
   });
 
-  document.addEventListener("scroll", () => {
-    if (activeChip) position(activeChip);
-  }, true);
+  if (pop && list && title) {
+    let activeChip = null;
+    let hideTimer = null;
 
-  window.addEventListener("resize", () => {
-    if (activeChip) position(activeChip);
-  });
+    const initials = (name) => {
+      const parts = String(name || "").trim().split(/\s+/).filter(Boolean);
+      const a = parts[0]?.[0] || "?";
+      const b = parts[1]?.[0] || "";
+      return (a + b).toUpperCase();
+    };
+
+    const parseNames = (chip) => {
+      const raw = (chip.getAttribute("data-names") || "").trim();
+      if (!raw) return [];
+      return raw.split("|").map(s => s.trim()).filter(Boolean);
+    };
+
+    const getEmoji = (chip) => {
+      return chip.getAttribute("data-emoji") ||
+        chip.querySelector(".e")?.textContent?.trim() ||
+        "👍";
+    };
+
+    const getCount = (chip) => {
+      return chip.getAttribute("data-count") ||
+        chip.querySelector(".c")?.textContent?.trim() ||
+        "0";
+    };
+
+    const position = (chip) => {
+      const rect = chip.getBoundingClientRect();
+      pop.style.display = "block";
+
+      const w = pop.offsetWidth;
+      const h = pop.offsetHeight;
+
+      let left = window.scrollX + rect.left;
+      let top = window.scrollY + rect.bottom + 10;
+
+      if (left + w > window.scrollX + window.innerWidth - 12) {
+        left = window.scrollX + window.innerWidth - w - 12;
+      }
+      if (left < window.scrollX + 12) {
+        left = window.scrollX + 12;
+      }
+
+      if (top + h > window.scrollY + window.innerHeight - 12) {
+        top = window.scrollY + rect.top - h - 10;
+      }
+
+      if (top < window.scrollY + 12) {
+        top = window.scrollY + 12;
+      }
+
+      pop.style.left = left + "px";
+      pop.style.top = top + "px";
+    };
+
+    const renderList = (chip) => {
+      const emoji = getEmoji(chip);
+      const count = getCount(chip);
+      const names = parseNames(chip);
+
+      const reactionType = chip.getAttribute("data-reaction-type") || emoji;
+      title.textContent = emoji + " " + count + " reaction" + (count === "1" ? "" : "s") + " • " + reactionType;
+      list.innerHTML = "";
+
+      if (!names.length) {
+        const row = document.createElement("div");
+        row.className = "tItem";
+
+        const av = document.createElement("div");
+        av.className = "pAvatar";
+        av.textContent = emoji;
+
+        const nm = document.createElement("div");
+        nm.className = "pName";
+        nm.textContent = "No participant names available";
+
+        row.appendChild(av);
+        row.appendChild(nm);
+        list.appendChild(row);
+        return;
+      }
+
+      for (const n of names.slice(0, 100)) {
+        const row = document.createElement("div");
+        row.className = "tItem";
+
+        const av = document.createElement("div");
+        av.className = "pAvatar";
+        av.textContent = initials(n);
+
+        const nm = document.createElement("div");
+        nm.className = "pName";
+        nm.textContent = n;
+
+        row.appendChild(av);
+        row.appendChild(nm);
+        list.appendChild(row);
+      }
+    };
+
+    const show = (chip) => {
+      clearTimeout(hideTimer);
+      activeChip = chip;
+      renderList(chip);
+      position(chip);
+    };
+
+    const hide = () => {
+      clearTimeout(hideTimer);
+      hideTimer = setTimeout(() => {
+        pop.style.display = "none";
+        activeChip = null;
+      }, 140);
+    };
+
+    document.addEventListener("mouseover", (e) => {
+      const chip = e.target?.closest?.(".reactChip");
+      if (!chip) return;
+      show(chip);
+    }, true);
+
+    document.addEventListener("mouseout", (e) => {
+      const chip = e.target?.closest?.(".reactChip");
+      if (!chip) return;
+      hide();
+    }, true);
+
+    pop.addEventListener("mouseenter", () => {
+      clearTimeout(hideTimer);
+    });
+
+    pop.addEventListener("mouseleave", () => {
+      hide();
+    });
+
+    document.addEventListener("scroll", () => {
+      if (activeChip) position(activeChip);
+    }, true);
+
+    window.addEventListener("resize", () => {
+      if (activeChip) position(activeChip);
+    });
+  }
 
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape") {
-      pop.style.display = "none";
-      activeChip = null;
+      if (pop) pop.style.display = "none";
+      closeDrawer();
+      closeFilePreview();
+      closeImageZoom();
     }
   });
 })();
@@ -2309,10 +4874,90 @@ function downloadTextFile(fileName, text, mime = "text/html;charset=utf-8") {
   setTimeout(() => URL.revokeObjectURL(url), 8000);
 }
 
+function supportsFolderExport() {
+  return typeof window !== "undefined" && "showDirectoryPicker" in window;
+}
+
+function buildBatchFolderName() {
+  return `Teams_Export_${formatFileTimestampYYYYMMDDHHMMSS(new Date())}`;
+}
+
+async function ensureExportDirectoryPicked() {
+  if (!supportsFolderExport()) return null;
+
+  if (_exportDirectoryHandle) {
+    return _exportDirectoryHandle;
+  }
+
+  const dirHandle = await window.showDirectoryPicker({
+    mode: "readwrite",
+    startIn: "downloads",
+  });
+
+  _exportDirectoryHandle = dirHandle;
+  return dirHandle;
+}
+
+async function ensureBatchFolderHandle(totalQueuedCount) {
+  if (!supportsFolderExport()) return null;
+
+  const rootDir = await ensureExportDirectoryPicked();
+  if (!rootDir) return null;
+
+  if (totalQueuedCount <= 1) {
+    _currentBatchFolderHandle = null;
+    _currentBatchFolderName = "";
+    return rootDir;
+  }
+
+  if (_currentBatchFolderHandle) {
+    return _currentBatchFolderHandle;
+  }
+
+  const folderName = buildBatchFolderName();
+  const subdir = await rootDir.getDirectoryHandle(folderName, { create: true });
+
+  _currentBatchFolderHandle = subdir;
+  _currentBatchFolderName = folderName;
+
+  return subdir;
+}
+
+async function writeTextFileToDirectory(dirHandle, fileName, text, mime = "text/html;charset=utf-8") {
+  const fileHandle = await dirHandle.getFileHandle(fileName, { create: true });
+  const writable = await fileHandle.createWritable();
+
+  await writable.write(new Blob([text], { type: mime }));
+  await writable.close();
+}
+
+async function saveExportHtmlFile(fileName, text, totalQueuedCount = 1) {
+  if (!supportsFolderExport()) {
+    downloadTextFile(fileName, text, "text/html;charset=utf-8");
+    return {
+      mode: "download",
+      folderName: "",
+    };
+  }
+
+  const targetDir = await ensureBatchFolderHandle(totalQueuedCount);
+  await writeTextFileToDirectory(targetDir, fileName, text, "text/html;charset=utf-8");
+
+  return {
+    mode: "filesystem",
+    folderName: _currentBatchFolderName || "",
+  };
+}
+
+function resetCurrentBatchFolder() {
+  _currentBatchFolderHandle = null;
+  _currentBatchFolderName = "";
+}
+
 /** =========================
  * EXPORT PIPELINE
  * ========================= */
-async function exportChatToOfflineHtml(chat, me, usedFileNames = null) {
+async function exportChatToOfflineHtml(chat, me, usedFileNames = null, totalQueuedCount = 1) {
   let members = Array.isArray(chat?.members) ? [...chat.members] : [];
 
   try {
@@ -2323,8 +4968,7 @@ async function exportChatToOfflineHtml(chat, me, usedFileNames = null) {
   }
 
   const exportTitle = chatDisplayName(chat, members);
-  const fileBase = fileBaseForChat(chat, me, members);
-  const initialName = `${safeFileName(fileBase)}.html`;
+  const initialName = buildExportFileName(chat, me, members);
   const outName = usedFileNames ? makeUniqueFileName(initialName, usedFileNames) : initialName;
 
   let messages;
@@ -2346,8 +4990,13 @@ async function exportChatToOfflineHtml(chat, me, usedFileNames = null) {
   const stats = {
     imagesEmbedded: 0,
     imagesBytes: 0,
+
     attachEmbedded: 0,
     attachBytes: 0,
+
+    attachTotalCount: 0,
+    attachTotalBytes: 0,
+
     failures: [],
   };
 
@@ -2360,7 +5009,19 @@ async function exportChatToOfflineHtml(chat, me, usedFileNames = null) {
     const dtStr = isNaN(created.getTime()) ? "(няма дата/час)" : formatDDMMYYYY_HHMMSS(created);
 
     const sender = extractSender(msg) || "Unknown";
-    let bodyHtml = extractBodyHtml(msg);
+    let bodyHtml = normalizeTeamsHtml(extractBodyHtml(msg));
+    const isDeletedNotice = isDeletedMessage(msg, bodyHtml);
+    const isSystemEvent = !isDeletedNotice && isSystemEventMessage(msg, bodyHtml);
+    const isEmojiOnly = !isSystemEvent && !isDeletedNotice && isEmojiOnlyHtml(bodyHtml);
+
+    if (isDeletedNotice) {
+      bodyHtml = `<div class="deletedNoticeText">This message has been deleted.</div>`;
+    }
+
+    if (isSystemEvent) {
+      const systemText = extractSystemEventText(msg, bodyHtml, members, me);
+      bodyHtml = normalizeSystemEventHtml(systemText);
+    }
 
     if (shouldAttemptHosted(bodyHtml)) {
       let hosted = [];
@@ -2382,10 +5043,13 @@ async function exportChatToOfflineHtml(chat, me, usedFileNames = null) {
     }
 
     let forwardedAttachments = extractForwardedAttachmentData(msg.attachments || [], members, me);
-    forwardedAttachments = await enrichForwardedAuthors(forwardedAttachments, members, me);
+    forwardedAttachments = await enrichForwardedAuthors(forwardedAttachments, members, me, stats);
 
     const { quotes: quotesFromAttachments, fileAttachments } =
       splitQuotesFromAttachments(msg.attachments || []);
+
+    stats.attachTotalCount += fileAttachments.length;
+    stats.attachTotalBytes += computeAttachmentsTotalSizeBytes(fileAttachments);
 
     bodyHtml = tokenizeFileAttachments(bodyHtml, fileAttachments, fileTokenToMeta);
 
@@ -2395,14 +5059,17 @@ async function exportChatToOfflineHtml(chat, me, usedFileNames = null) {
       sender,
       dtStr,
       dtMs,
-      isMe: isFromMe(msg, me?.id),
+      isMe: isSystemEvent || isDeletedNotice ? false : isFromMe(msg, me?.id),
+      isSystemEvent,
+      isDeletedNotice,
+      isEmojiOnly,
       bodyHtml,
-      replyToId: msg.replyToId || "",
-      reactionsHtml: buildReactionsFromGraph(msg, members, me),
+      replyToId: isSystemEvent || isDeletedNotice ? "" : (msg.replyToId || ""),
+      reactionsHtml: isSystemEvent || isDeletedNotice ? "" : buildReactionsFromGraph(msg, members, me),
       forwardHtml: "",
       quoteHtml: "",
-      _quotesFromAttachments: quotesFromAttachments,
-      _forwardedAttachments: forwardedAttachments,
+      _quotesFromAttachments: isSystemEvent || isDeletedNotice ? [] : quotesFromAttachments,
+      _forwardedAttachments: isSystemEvent || isDeletedNotice ? [] : forwardedAttachments,
       _rawBodyHtml: bodyHtml,
     });
   }
@@ -2445,14 +5112,22 @@ async function exportChatToOfflineHtml(chat, me, usedFileNames = null) {
 
   const tokenToDataUrl = await embedFileAttachments(fileTokenToMeta, stats);
   for (const dto of dtos) {
-    dto.bodyHtml = replaceFileTokensOffline(dto.bodyHtml, tokenToDataUrl, fileTokenToMeta);
+    dto.bodyHtml = replaceFileTokensOffline(dto.bodyHtml, tokenToDataUrl, fileTokenToMeta, stats);
   }
 
   const archiveRange = getArchiveRange(dtos);
-  const html = buildHtml(dtos, stats, exportTitle, archiveRange);
-  downloadTextFile(outName, html);
+  const html = buildHtml(dtos, stats, exportTitle, archiveRange, members, me);
 
-  return { outName, stats, items: dtos.length, archiveRange };
+  const saveInfo = await saveExportHtmlFile(outName, html, totalQueuedCount);
+
+  return {
+    outName,
+    stats,
+    items: dtos.length,
+    archiveRange,
+    saveMode: saveInfo?.mode || "download",
+    batchFolderName: saveInfo?.folderName || "",
+  };
 }
 
 /** =========================
@@ -2536,12 +5211,49 @@ async function runExportQueue() {
   }
 
   _queueRunning = true;
+  resetCurrentBatchFolder();
   renderChats();
   setCounts();
   setBusy(true);
 
   appendLogLine(`Queue start: ${queued.length} chat(s).`);
-  appendLogLine("Note: browser may ask to allow multiple automatic downloads for this site.");
+
+  if (supportsFolderExport()) {
+    try {
+      await ensureBatchFolderHandle(queued.length);
+
+      if (queued.length > 1 && _currentBatchFolderName) {
+        appendLogLine(`Exports will be saved in subfolder: ${_currentBatchFolderName}`);
+      } else {
+        appendLogLine(`Export folder selected successfully.`);
+      }
+    } catch (e) {
+      _queueRunning = false;
+      resetCurrentBatchFolder();
+      removeQueuedItemsThatNeverStarted();
+      renderChats();
+      setCounts();
+      setBusy(false);
+
+      const msg = normalizeErrorMessage(e).toLowerCase();
+
+      if (
+        msg.includes("aborterror") ||
+        msg.includes("the user aborted a request") ||
+        msg.includes("user cancelled") ||
+        msg.includes("user canceled")
+      ) {
+        appendLogLine("Export folder selection was cancelled.");
+      } else {
+        appendLogLine(`Export folder selection failed: ${normalizeErrorMessage(e)}`);
+      }
+
+      return;
+    }
+  } else {
+    appendLogLine("File System Access API is not available. Falling back to browser downloads.");
+    appendLogLine("Note: browser may ask to allow multiple automatic downloads for this site.");
+  }
 
   const usedFileNames = new Set(
     _queueItems
@@ -2581,7 +5293,7 @@ async function runExportQueue() {
       appendLogLine(`RUNNING: ${item.title}`);
 
       try {
-        const res = await exportChatToOfflineHtml(chat, _me, usedFileNames);
+        const res = await exportChatToOfflineHtml(chat, _me, usedFileNames, queued.length);
         item.status = "done";
         item.result = res;
         item.finishedAt = new Date().toISOString();
@@ -2614,6 +5326,7 @@ async function runExportQueue() {
     appendLogLine(`Queue finished. Done: ${qc.done}, Failed: ${qc.failed}, Total: ${_queueItems.length}`);
   } finally {
     _queueRunning = false;
+    resetCurrentBatchFolder();
     renderChats();
     setCounts();
     setBusy(false);
@@ -2915,7 +5628,7 @@ async function doInit() {
   bindUiEvents();
   showLoginView();
 
-  try {
+    try {
     setBusy(true);
     log("Initializing auth…");
 
@@ -2945,6 +5658,16 @@ async function doInit() {
     setCounts();
   } catch (e) {
     console.error(e);
+
+    if (isMsalNoTokenRequestCacheError(e)) {
+      console.warn("[MSAL] Ignored no_token_request_cache_error during app init:", e);
+      _me = null;
+      clearAppSessionMeta();
+      showLoginView();
+      setCounts();
+      return;
+    }
+
     showLoginView();
     log(`Init failed:\n${normalizeErrorMessage(e)}`);
     alert(`Init failed:\n${normalizeErrorMessage(e)}`);
