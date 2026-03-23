@@ -224,6 +224,62 @@ body{
   justify-content:flex-end;
 }
 
+.langDock{
+  position:fixed;
+  top:18px;
+  right:18px;
+  z-index:40;
+  display:flex;
+  align-items:center;
+  gap:8px;
+  padding:8px 10px;
+  border-radius:14px;
+  background:rgba(15,23,42,.82);
+  border:1px solid var(--line);
+  box-shadow:var(--shadow);
+  backdrop-filter:blur(10px);
+}
+
+.langLabel{
+  font-size:12px;
+  font-weight:900;
+  color:var(--soft);
+  white-space:nowrap;
+}
+
+.langSelect{
+  appearance:none;
+  border:none;
+  outline:none;
+  cursor:pointer;
+  min-width:132px;
+  border-radius:10px;
+  border:1px solid var(--line2);
+  background:rgba(255,255,255,.06);
+  color:var(--text);
+  padding:9px 12px;
+  font-size:13px;
+  font-weight:800;
+}
+
+.langSelect option{
+  color:#111827;
+}
+
+@media (max-width: 720px){
+  .langDock{
+    top:10px;
+    right:10px;
+    left:10px;
+    justify-content:space-between;
+  }
+
+  .langSelect{
+    min-width:0;
+    flex:1;
+  }
+}
+
 .stepsRow{
   display:grid;
   grid-template-columns:repeat(5, minmax(0, 1fr));
@@ -512,15 +568,24 @@ body{
 <body>
   <div class="appShell">
 
+    <div class="langDock card">
+      <span class="langLabel" data-i18n="appTitle">Teams Chat Export Portal</span>
+      <select id="langSelect" class="langSelect" aria-label="Language">
+        <option value="bg">Български</option>
+        <option value="en">English</option>
+        <option value="fr">Français</option>
+      </select>
+    </div>
+
     <section id="loginView" class="loginWrap">
       <div class="card loginBox">
         <div class="loginInner">
-          <span class="pill">Microsoft Teams</span>
-          <h1 class="loginTitle">Teams Chat Export Portal</h1>
-          <p class="loginText">
+          <span class="pill" data-i18n="loginTag">Microsoft Teams</span>
+          <h1 class="loginTitle" data-i18n="loginTitle">Teams Chat Export Portal</h1>
+          <p class="loginText" data-i18n="loginText">
             Secure internal portal for exporting Microsoft Teams chats into fully offline HTML archives.
           </p>
-          <button id="btnLogin" class="btn btnPrimary loginBtn">Sign in with Microsoft</button>
+          <button id="btnLogin" class="btn btnPrimary loginBtn" data-i18n="signInWithMicrosoft">Sign in with Microsoft</button>
         </div>
       </div>
     </section>
@@ -528,76 +593,76 @@ body{
     <section id="appView" class="appView hidden">
       <header class="card topbar">
         <div>
-          <h1 class="brandTitle">Teams Chat Export Portal</h1>
-          <p class="brandSub">
+          <h1 class="brandTitle" data-i18n="appTitle">Teams Chat Export Portal</h1>
+          <p class="brandSub" data-i18n="brandSub">
             Избор и експорт на Teams чатове в единични HTML архиви за локално използване.
           </p>
         </div>
 
         <div class="topbarRight">
-          <span id="mePill" class="pill">Not signed in</span>
+          <span id="mePill" class="pill" data-i18n="notSignedIn">Not signed in</span>
         </div>
       </header>
 
       <section class="stepsRow">
         <div class="card stepCard">
           <div class="stepNo">1</div>
-          <h3 class="stepTitle">Влез в портала</h3>
-          <p class="stepText">
+          <h3 class="stepTitle" data-i18n="step1Title">Влез в портала</h3>
+          <p class="stepText" data-i18n="step1Text">
             Използвай Microsoft акаунта си, за да се отвори достъп до наличните за теб Teams чатове.
           </p>
         </div>
 
         <div class="card stepCard">
           <div class="stepNo">2</div>
-          <h3 class="stepTitle">Зареди чатовете</h3>
-          <p class="stepText">
+          <h3 class="stepTitle" data-i18n="step2Title">Зареди чатовете</h3>
+          <p class="stepText" data-i18n="step2Text">
             Натисни Load chats, за да се изтегли пълният списък с достъпните 1:1 и групови чатове.
           </p>
         </div>
 
         <div class="card stepCard">
           <div class="stepNo">3</div>
-          <h3 class="stepTitle">Избери какво да архивираш</h3>
-          <p class="stepText">
+          <h3 class="stepTitle" data-i18n="step3Title">Избери какво да архивираш</h3>
+          <p class="stepText" data-i18n="step3Text">
             Маркирай един, няколко или всички чатове, които искаш да включиш в export queue.
           </p>
         </div>
 
         <div class="card stepCard">
           <div class="stepNo">4</div>
-          <h3 class="stepTitle">Стартирай експорт</h3>
-          <p class="stepText">
+          <h3 class="stepTitle" data-i18n="step4Title">Стартирай експорт</h3>
+          <p class="stepText" data-i18n="step4Text">
             Пусни Export selected, Queue all или Retry failed only според текущия статус на списъка.
           </p>
         </div>
 
         <div class="card stepCard">
           <div class="stepNo">5</div>
-          <h3 class="stepTitle">Разреши свалянията</h3>
-          <p class="stepText">
+          <h3 class="stepTitle" data-i18n="step5Title">Разреши свалянията</h3>
+          <p class="stepText" data-i18n="step5Text">
             При първия експорт браузърът може да поиска разрешение за сваляне на множество файлове.
-            Натисни <b>Allow</b>, за да се запазят всички архиви автоматично.
+            Натисни Allow, за да се запазят всички архиви автоматично.
           </p>
         </div>
       </section>
 
       <section class="card actionBar">
         <div class="actionBarLeft">
-          <h2>Основни действия</h2>
-          <p>Използвай действията вдясно, за да заредиш списъка и да стартираш export queue.</p>
+          <h2 data-i18n="actionsTitle">Основни действия</h2>
+          <p data-i18n="actionsText">Използвай действията вдясно, за да заредиш списъка и да стартираш export queue.</p>
         </div>
 
         <div class="actionBarButtons">
-          <button id="btnChats" class="btn">Load chats</button>
-          <button id="btnExport" class="btn btnPrimary">Export selected</button>
+          <button id="btnChats" class="btn" data-i18n="loadChats">Load chats</button>
+          <button id="btnExport" class="btn btnPrimary" data-i18n="exportSelected">Export selected</button>
         </div>
       </section>
 
       <section class="card chatPanel">
         <div class="panelHeader">
-          <h2 class="sectionTitle">Chat selection</h2>
-          <p class="sectionDesc">
+          <h2 class="sectionTitle" data-i18n="chatSelectionTitle">Chat selection</h2>
+          <p class="sectionDesc" data-i18n="chatSelectionDesc">
             Избери чатове от списъка, филтрирай по заглавие и следи статуса на queue обработката.
           </p>
         </div>
@@ -605,12 +670,12 @@ body{
         <div class="panelBody">
           <div class="chatStats">
             <div class="chatStat">
-              <div class="chatStatLabel">Общо чатове</div>
+              <div class="chatStatLabel" data-i18n="totalChats">Общо чатове</div>
               <div id="countStat" class="chatStatValue">0</div>
             </div>
 
             <div class="chatStat">
-              <div class="chatStatLabel">Избрани</div>
+              <div class="chatStatLabel" data-i18n="selectedChats">Избрани</div>
               <div id="selectedStat" class="chatStatValue">0</div>
             </div>
           </div>
@@ -620,6 +685,7 @@ body{
               id="q"
               class="input"
               type="text"
+              data-i18n-placeholder="searchPlaceholder"
               placeholder="Search by topic, participants or visible title..."
             />
           </div>

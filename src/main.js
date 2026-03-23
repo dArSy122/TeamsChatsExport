@@ -2,6 +2,14 @@
 // Clean production-focused build: login + chats + queue export + offline HTML + forwarded resolution
 
 import * as msal from "@azure/msal-browser";
+import {
+  t,
+  tFor,
+  getCurrentLanguage,
+  setCurrentLanguage,
+  getSupportedLanguages,
+  applyI18nToDocument,
+} from "./i18n";
 
 /** =========================
  * CONFIG
@@ -124,6 +132,8 @@ const ui = {
   q: null,
   chatList: null,
   queueStatus: null,
+
+  langSelect: null,
 };
 
 function refreshUiRefs() {
@@ -143,6 +153,8 @@ function refreshUiRefs() {
   ui.q = $("q");
   ui.chatList = $("chatList");
   ui.queueStatus = $("queueStatus");
+
+  ui.langSelect = $("langSelect");
 }
 
 function log(obj) {
@@ -152,6 +164,40 @@ function log(obj) {
 
 function appendLogLine(line) {
   console.log("[APP]", String(line));
+}
+
+function applyLanguageToUi() {
+  applyI18nToDocument(document);
+
+  if (ui.langSelect) {
+    ui.langSelect.value = getCurrentLanguage();
+  }
+
+  ensureExtraButtons();
+  setCounts();
+  renderChats();
+}
+
+function populateLanguageSelector() {
+  if (!ui.langSelect) return;
+
+  ui.langSelect.innerHTML = "";
+
+  for (const lang of getSupportedLanguages()) {
+    const opt = document.createElement("option");
+    opt.value = lang.code;
+    opt.textContent = lang.label;
+    ui.langSelect.appendChild(opt);
+  }
+
+  ui.langSelect.value = getCurrentLanguage();
+}
+
+function bindLanguageSelector() {
+  ui.langSelect?.addEventListener("change", () => {
+    setCurrentLanguage(ui.langSelect.value);
+    applyLanguageToUi();
+  });
 }
 
 function assertUiIds() {
@@ -169,12 +215,13 @@ function assertUiIds() {
     "q",
     "chatList",
     "queueStatus",
+    "langSelect",
   ];
 
   const missing = must.filter((id) => !$(id));
   if (missing.length) {
     console.warn("[UI] missing ids:", missing);
-    log("UI missing element IDs:\n" + missing.join(", "));
+    log(t("uiMissingElementIds", { ids: missing.join(", ") }));
     return false;
   }
   return true;
@@ -198,7 +245,6 @@ function ensureExtraButtons() {
     const btn = document.createElement("button");
     btn.id = "btnQueueAll";
     btn.type = "button";
-    btn.textContent = "Queue all for export";
     btn.className = "btn";
     host.appendChild(btn);
   }
@@ -207,12 +253,19 @@ function ensureExtraButtons() {
     const btn = document.createElement("button");
     btn.id = "btnRetryFailed";
     btn.type = "button";
-    btn.textContent = "Retry failed only";
     btn.className = "btn btnDanger";
     host.appendChild(btn);
   }
 
   refreshUiRefs();
+
+  if (ui.btnQueueAll) {
+    ui.btnQueueAll.textContent = t("queueAll");
+  }
+
+  if (ui.btnRetryFailed) {
+    ui.btnRetryFailed.textContent = t("retryFailedOnly");
+  }
 }
 
 /** =========================
@@ -1106,8 +1159,12 @@ function updateQueueStatus() {
   const running = counts.running || 0;
   const failed = counts.failed || 0;
 
-  ui.queueStatus.textContent =
-    `Queue progress: ${done} done • ${running} running • ${failed} failed • ${total} total`;
+  ui.queueStatus.textContent = t("queueProgress", {
+    done,
+    running,
+    failed,
+    total,
+  });
 
   ui.queueStatus.classList.remove("hidden");
 }
@@ -1122,25 +1179,33 @@ function getQueueProgressText() {
   const processed = done + failed;
 
   if (running > 0) {
-    return `Exporting ${Math.min(processed + 1, total)} / ${total}`;
+    return t("queueExporting", {
+      current: Math.min(processed + 1, total),
+      total,
+    });
   }
 
   if (processed < total) {
-    return `Preparing queue… ${processed} / ${total}`;
+    return t("queuePreparing", {
+      processed,
+      total,
+    });
   }
 
-  return `Queue finished ${total} / ${total}`;
+  return t("queueFinished", { total });
 }
 
 function setMePill() {
   if (!ui.mePill) return;
 
   if (!_me) {
-    ui.mePill.textContent = "Not signed in";
+    ui.mePill.textContent = t("notSignedIn");
     return;
   }
 
-  ui.mePill.textContent = `Signed in: ${_me.displayName || _me.userPrincipalName || _me.id}`;
+  ui.mePill.textContent = t("signedInAs", {
+    name: _me.displayName || _me.userPrincipalName || _me.id,
+  });
 }
 
 function setCounts() {
@@ -1165,14 +1230,14 @@ function setBusy(isBusy) {
     ui.btnExport.disabled = b || !_me || _selectedChatIds.size === 0 || _chats.length === 0;
     ui.btnExport.textContent = _queueRunning
       ? getQueueProgressText()
-      : `Export selected${_selectedChatIds.size > 0 ? ` (${_selectedChatIds.size})` : ""}`;
+      : `${t("exportSelected")}${_selectedChatIds.size > 0 ? ` (${_selectedChatIds.size})` : ""}`;
   }
 
   if (ui.btnQueueAll) {
     ui.btnQueueAll.disabled = b || !_me || _chats.length === 0;
     ui.btnQueueAll.textContent = _queueRunning
       ? getQueueProgressText()
-      : `Queue all for export${_chats.length > 0 ? ` (${_chats.length})` : ""}`;
+      : `${t("queueAll")}${_chats.length > 0 ? ` (${_chats.length})` : ""}`;
   }
 
   if (ui.btnRetryFailed) {
@@ -1180,7 +1245,7 @@ function setBusy(isBusy) {
     ui.btnRetryFailed.disabled = b || !_me || failedCount === 0;
     ui.btnRetryFailed.textContent = _queueRunning
       ? getQueueProgressText()
-      : `Retry failed only${failedCount > 0 ? ` (${failedCount})` : ""}`;
+      : `${t("retryFailedOnly")}${failedCount > 0 ? ` (${failedCount})` : ""}`;
   }
 }
 
@@ -1272,8 +1337,8 @@ async function forceReLogin(reason) {
     await login();
   } catch (e) {
     console.error(e);
-    appendLogLine(`Re-login redirect failed: ${normalizeErrorMessage(e)}`);
-    alert(`Re-login failed:\n${normalizeErrorMessage(e)}`);
+    appendLogLine(t("reloginRedirectFailed", { message: normalizeErrorMessage(e) }));
+    alert(`${t("reloginFailed")}:\n${normalizeErrorMessage(e)}`);
   } finally {
     _sessionReauthInProgress = false;
   }
@@ -1289,7 +1354,7 @@ function checkSessionPolicy() {
 
   const remaining = getPreExportMsRemaining();
   if (remaining <= 0) {
-    void forceReLogin("Session expired: no export was started within 3 minutes. Please sign in again.");
+    void forceReLogin(t("sessionExpired"));
     return;
   }
 
@@ -1358,17 +1423,17 @@ async function login() {
     await initAuth();
 
     if (msalInstance.getActiveAccount()) {
-      appendLogLine("Already signed in.");
+      appendLogLine(t("alreadySignedIn"));
       return;
     }
 
     const interactionStatus = sessionStorage.getItem("msal.interaction.status");
     if (interactionStatus) {
-      appendLogLine(`MSAL interaction already in progress: ${interactionStatus}`);
+      appendLogLine(t("interactionAlreadyInProgress", { status: interactionStatus }));
       return;
     }
 
-    appendLogLine("Starting Microsoft login redirect…");
+    appendLogLine(t("loginRedirectStart"));
 
     await msalInstance.loginRedirect({
       scopes: SCOPES,
@@ -1378,19 +1443,19 @@ async function login() {
   } catch (e) {
     if (isMsalNoTokenRequestCacheError(e)) {
       console.warn("[MSAL] Suppressed no_token_request_cache_error in login():", e);
-      appendLogLine("MSAL redirect cache mismatch detected. Retry the sign-in once.");
+      appendLogLine(t("msalCacheMismatchRetry"));
       return;
     }
 
     if (isMsalInteractionInProgressError(e)) {
-      appendLogLine("Login already in progress. Please wait for redirect handling to finish.");
+      appendLogLine(t("loginInProgress"));
       return;
     }
 
     console.error(e);
     const msg = normalizeErrorMessage(e);
-    appendLogLine(`Login failed: ${msg}`);
-    alert(`Login failed:\n${msg}`);
+    appendLogLine(`${t("loginFailed")}: ${msg}`);
+    alert(`${t("loginFailed")}:\n${msg}`);
   }
 }
 
@@ -2194,21 +2259,23 @@ if (mt.includes("unknownfuturevalue") || type.includes("unknownfuturevalue")) {
 }
 }
 
-function normalizeSystemEventHtml(input) {
+function normalizeSystemEventHtml(input, lang) {
   const src = String(input || "").trim();
-  if (!src) return `<div class="systemEventText">[System event]</div>`;
+  const fallback = tFor(lang, "exportSystemEventFallback");
+
+  if (!src) return `<div class="systemEventText">${esc(fallback)}</div>`;
 
   try {
     const doc = new DOMParser().parseFromString(src, "text/html");
     const text = (doc.body?.textContent || "").replace(/\s+/g, " ").trim();
-    if (!text) return `<div class="systemEventText">[System event]</div>`;
+    if (!text) return `<div class="systemEventText">${esc(fallback)}</div>`;
 
     return `<div class="systemEventText">${esc(text)}</div>`;
   } catch {
     const text = src.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
     return text
       ? `<div class="systemEventText">${esc(text)}</div>`
-      : `<div class="systemEventText">[System event]</div>`;
+      : `<div class="systemEventText">${esc(fallback)}</div>`;
   }
 }
 
@@ -2401,7 +2468,7 @@ function extractForwardFromBody(bodyHtml) {
   return { isForwarded: true, originalAuthor, originalTs: "", originalBodyHtml: "" };
 }
 
-function renderForwardBlock(fwd) {
+function renderForwardBlock(fwd, lang) {
   if (!fwd?.isForwarded) return "";
 
   const meta = [fwd.originalAuthor, fwd.originalTs].filter(Boolean).join(" • ") || "—";
@@ -2410,19 +2477,19 @@ function renderForwardBlock(fwd) {
   return `
     <div class="fwdWrap">
       <div class="fwdHeader">
-        <span class="fwdChip">Препратено</span>
+        <span class="fwdChip">${esc(tFor(lang, "exportForwarded"))}</span>
         <div class="fwdMeta">${esc(meta)}</div>
       </div>
       <div class="fwdBody">
         <div class="fwdInner">
-          ${bodyHtml || `<div class="fwdEmpty">Няма съдържание</div>`}
+          ${bodyHtml || `<div class="fwdEmpty">${esc(tFor(lang, "exportNoContent"))}</div>`}
         </div>
       </div>
     </div>
   `;
 }
 
-function renderQuoteStack(quotes) {
+function renderQuoteStack(quotes, lang) {
   const q = Array.isArray(quotes) ? quotes.filter(Boolean) : [];
   if (!q.length) return "";
 
@@ -2435,10 +2502,10 @@ function renderQuoteStack(quotes) {
           <span class="qTs">${esc(item.ts || "")}</span>
         </div>`
       : `<div class="quoteHead">
-          <span class="qAuthor">${esc(item.author || "Цитат")}</span>
+          <span class="qAuthor">${esc(item.author || tFor(lang, "exportQuote"))}</span>
         </div>`;
 
-    const jump = item.refId ? ` <a class="qJump" href="#mid-${esc(item.refId)}">Виж</a>` : "";
+    const jump = item.refId ? ` <a class="qJump" href="#mid-${esc(item.refId)}">${esc(tFor(lang, "exportView"))}</a>` : "";
 
     out += `
       <div class="quoteBox">
@@ -3148,7 +3215,7 @@ async function embedFileAttachments(fileTokenToMeta, stats) {
   return tokenToDataUrl;
 }
 
-function replaceFileTokensOffline(html, tokenToDataUrl, fileTokenToMeta, stats = null) {
+function replaceFileTokensOffline(html, tokenToDataUrl, fileTokenToMeta, stats = null, lang = "en") {
   let out = html || "";
   const failureMap = buildAttachmentFailureMap(stats);
 
@@ -3156,11 +3223,10 @@ function replaceFileTokensOffline(html, tokenToDataUrl, fileTokenToMeta, stats =
     /<div\b[^>]*\bdata-file-token=(["'])(FILE_\d+)\1[^>]*>[\s\S]*?<\/div>/gi,
     (full, q, token) => {
       const meta = fileTokenToMeta.get(token) || {};
-      const fileName = meta.fileName || "Файл";
+      const fileName = meta.fileName || tFor(lang, "attachmentFileFallback");
       const got = tokenToDataUrl.get(token);
       const failure = failureMap.get(token);
 
-      // ✅ SUCCESS — embed-нат файл
       if (got?.dataUrl) {
         const sizeLabel = got.size ? formatBytesHuman(got.size) : "";
         const mime = got.mime || meta.contentType || "application/octet-stream";
@@ -3180,40 +3246,34 @@ function replaceFileTokensOffline(html, tokenToDataUrl, fileTokenToMeta, stats =
                 data-file-name="${esc(fileName)}"
                 data-file-mime="${esc(mime)}"
               >
-                Преглед
+                ${esc(tFor(lang, "attachmentPreview"))}
               </button>
-              <a class="attDownload" download="${esc(fileName)}" href="${esc(got.dataUrl)}">Свали офлайн</a>
+              <a class="attDownload" download="${esc(fileName)}" href="${esc(got.dataUrl)}">${esc(tFor(lang, "attachmentDownloadOffline"))}</a>
             </div>
           </div>
         `;
       }
 
-      // ❌ FAILURE — user-friendly message
-      let reasonText = "файлът не е вграден";
+      let reasonText = tFor(lang, "attachmentMissingGeneric");
+      const err = String(failure?.error || "").toLowerCase();
 
-      const err = (failure?.error || "").toLowerCase();
-
-      // 🔴 НОВО — основен случай (твоят)
       if (
         err.includes("404") ||
         err.includes("notfound") ||
         err.includes("accessdenied") ||
         err.includes("share_access_denied_or_expired")
       ) {
-        reasonText = "файлът не е бил наличен за сваляне от чата";
-      }
-
-      // други случаи (запазваме ги)
-      else if (err.includes("user_declined_large_embed")) {
-        reasonText = "файлът не е вграден (потребителят отказа голям файл)";
+        reasonText = tFor(lang, "attachmentMissingUnavailable");
+      } else if (err.includes("user_declined_large_embed")) {
+        reasonText = tFor(lang, "attachmentMissingDeclinedLarge");
       } else if (err.includes("denied_extension")) {
-        reasonText = "файлът не е вграден (неподдържан тип файл)";
+        reasonText = tFor(lang, "attachmentMissingBlockedType");
       } else if (err.includes("too_large_each")) {
-        reasonText = "файлът е твърде голям за вграждане";
+        reasonText = tFor(lang, "attachmentMissingTooLarge");
       } else if (err.includes("too_large_total")) {
-        reasonText = "надвишен е общият лимит за файлове";
+        reasonText = tFor(lang, "attachmentMissingTotalLimit");
       } else if (err.includes("attachment_unresolved")) {
-        reasonText = "файлът не може да бъде извлечен от Teams";
+        reasonText = tFor(lang, "attachmentMissingUnresolved");
       }
 
       return `
@@ -3231,7 +3291,7 @@ function replaceFileTokensOffline(html, tokenToDataUrl, fileTokenToMeta, stats =
   return out;
 }
 
-function buildParticipantsPanel(members, me) {
+function buildParticipantsPanel(members, me, lang) {
   const list = Array.isArray(members) ? members : [];
   if (list.length <= 1) return "";
 
@@ -3297,11 +3357,13 @@ function buildParticipantsPanel(members, me) {
     return a.displayName.localeCompare(b.displayName);
   });
 
+  const pluralSuffix = unique.length === 1 ? "" : "s";
+
   let html = `
     <section class="participantsPanel">
       <div class="participantsHead">
-        <div class="participantsTitle">Участници в чата</div>
-        <div class="participantsCount">${unique.length} participant${unique.length === 1 ? "" : "s"}</div>
+        <div class="participantsTitle">${esc(tFor(lang, "exportParticipantsTitle"))}</div>
+        <div class="participantsCount">${esc(tFor(lang, "exportParticipantsCount", { count: unique.length, s: pluralSuffix }))}</div>
       </div>
       <div class="participantsGrid">
   `;
@@ -3321,7 +3383,7 @@ function buildParticipantsPanel(members, me) {
         <div class="participantMeta">
           <div class="participantNameRow">
             <div class="participantName">${esc(p.displayName)}</div>
-            ${p.isMe ? `<span class="participantBadge">You</span>` : ``}
+            ${p.isMe ? `<span class="participantBadge">${esc(tFor(lang, "exportYou"))}</span>` : ``}
           </div>
           ${
             p.secondary
@@ -3344,9 +3406,9 @@ function buildParticipantsPanel(members, me) {
 /** =========================
  * EXPORT HTML BUILDER
  * ========================= */
-function buildHtml(items, stats, exportTitle, archiveRange, members, me) {
+function buildHtml(items, stats, exportTitle, archiveRange, members, me, lang) {
   const generatedAt = new Date().toLocaleString();
-  const participantsHtml = buildParticipantsPanel(members, me);
+  const participantsHtml = buildParticipantsPanel(members, me, lang);
 
   const getInitials = (name) => {
     const parts = String(name || "").trim().split(/\s+/).filter(Boolean);
@@ -3431,7 +3493,7 @@ function buildHtml(items, stats, exportTitle, archiveRange, members, me) {
 <head>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
-<title>${esc(exportTitle || "Teams Chat Archive (OFFLINE)")}</title>
+<title>${esc(exportTitle || tFor(lang, "exportArchiveDefaultTitle"))}</title>
 <style>
   :root{
     --bg:#0b1220;
@@ -4288,21 +4350,21 @@ function buildHtml(items, stats, exportTitle, archiveRange, members, me) {
 <body>
   <div class="topbar">
     <div>
-      <div class="title">${esc(exportTitle || "Teams Chat Archive (OFFLINE)")}</div>
+      <div class="title">${esc(exportTitle || tFor(lang, "exportArchiveDefaultTitle"))}</div>
       <div class="meta">
-        <span class="pill">Елементи: ${items.length}</span>
-        <span class="pill">Период: ${esc(archiveRange?.label || "—")}</span>
-        <span class="pill">Генериран: ${esc(generatedAt)}</span>
-        <span class="pill">Снимки: ${stats.imagesEmbedded || 0} embedded • ${((stats.imagesBytes || 0) / 1024 / 1024).toFixed(1)} MB</span>
-                <span class="pill">
-          Файлове:
-          • ${stats.attachEmbedded || 0} embedded • ${esc(formatBytesToMB(stats.attachBytes || 0) || "0.00 MB")}
+        <span class="pill">${esc(tFor(lang, "exportItems"))}: ${items.length}</span>
+        <span class="pill">${esc(tFor(lang, "exportPeriod"))}: ${esc(archiveRange?.label || "—")}</span>
+        <span class="pill">${esc(tFor(lang, "exportGenerated"))}: ${esc(generatedAt)}</span>
+        <span class="pill">${esc(tFor(lang, "exportImages"))}: ${stats.imagesEmbedded || 0} ${esc(tFor(lang, "exportEmbedded"))} • ${((stats.imagesBytes || 0) / 1024 / 1024).toFixed(1)} MB</span>
+        <span class="pill">
+          ${esc(tFor(lang, "exportFiles"))}:
+          • ${stats.attachEmbedded || 0} ${esc(tFor(lang, "exportEmbedded"))} • ${esc(formatBytesToMB(stats.attachBytes || 0) || "0.00 MB")}
         </span>
       </div>
     </div>
     <div class="actions">
-      <button class="btn" id="btnParticipants">👥 Participants</button>
-      <button class="btn" id="btnBottom">⬇ Най-нови</button>
+      <button class="btn" id="btnParticipants">👥 ${esc(tFor(lang, "exportParticipants"))}</button>
+      <button class="btn" id="btnBottom">⬇ ${esc(tFor(lang, "exportLatest"))}</button>
     </div>
   </div>
 
@@ -4317,8 +4379,8 @@ function buildHtml(items, stats, exportTitle, archiveRange, members, me) {
     <aside class="participantsDrawer" id="participantsDrawer" aria-hidden="true">
       <div class="participantsDrawerHead">
         <div>
-          <div class="participantsDrawerTitle">Участници в чата</div>
-          <div class="participantsDrawerSub">Хората, които са част от този разговор</div>
+          <div class="participantsDrawerTitle">${esc(tFor(lang, "exportParticipantsTitle"))}</div>
+          <div class="participantsDrawerSub">${esc(tFor(lang, "exportParticipantsSubtitle"))}</div>
         </div>
         <button class="btn drawerCloseBtn" id="btnCloseParticipants">✕</button>
       </div>
@@ -4329,7 +4391,7 @@ function buildHtml(items, stats, exportTitle, archiveRange, members, me) {
     </aside>
 
     <div class="reactPopover" id="reactPopover" role="dialog" aria-modal="false">
-      <div class="tTitle" id="rpTitle">Реакции</div>
+      <div class="tTitle" id="rpTitle">${esc(tFor(lang, "exportReactions"))}</div>
       <div id="rpList"></div>
     </div>
 
@@ -4338,8 +4400,8 @@ function buildHtml(items, stats, exportTitle, archiveRange, members, me) {
     <section class="filePreviewModal" id="filePreviewModal" aria-hidden="true">
       <div class="filePreviewHead">
         <div>
-          <div class="filePreviewTitle" id="filePreviewTitle">File preview</div>
-          <div class="filePreviewSub" id="filePreviewSub">Offline preview</div>
+          <div class="filePreviewTitle" id="filePreviewTitle">${esc(tFor(lang, "exportFilePreview"))}</div>
+          <div class="filePreviewSub" id="filePreviewSub">${esc(tFor(lang, "exportOfflinePreview"))}</div>
         </div>
         <button class="btn filePreviewClose" id="btnCloseFilePreview">✕</button>
       </div>
@@ -4351,8 +4413,8 @@ function buildHtml(items, stats, exportTitle, archiveRange, members, me) {
     <section class="imageZoomModal" id="imageZoomModal" aria-hidden="true">
       <div class="imageZoomHead">
         <div>
-          <div class="imageZoomTitle" id="imageZoomTitle">Image preview</div>
-          <div class="imageZoomSub" id="imageZoomSub">Натисни Esc или извън прозореца, за да затвориш</div>
+          <div class="imageZoomTitle" id="imageZoomTitle">${esc(tFor(lang, "exportImagePreview"))}</div>
+          <div class="imageZoomSub" id="imageZoomSub">${esc(tFor(lang, "exportCloseHint"))}</div>
         </div>
         <button class="btn imageZoomClose" id="btnCloseImageZoom">✕</button>
       </div>
@@ -4361,6 +4423,31 @@ function buildHtml(items, stats, exportTitle, archiveRange, members, me) {
 
 <script>
 (function(){
+  const TXT = {
+    reactionListTitle: ${JSON.stringify(tFor(lang, "exportReactionListTitle"))},
+    noParticipantNames: ${JSON.stringify(tFor(lang, "exportNoParticipantNames"))},
+    filePreview: ${JSON.stringify(tFor(lang, "exportFilePreview"))},
+    offlinePreview: ${JSON.stringify(tFor(lang, "exportOfflinePreview"))},
+    imagePreview: ${JSON.stringify(tFor(lang, "exportImagePreview"))},
+    closeHint: ${JSON.stringify(tFor(lang, "exportCloseHint"))},
+    unsupportedPreviewTitle: ${JSON.stringify(tFor(lang, "exportUnsupportedPreviewTitle"))},
+    unsupportedPreviewText: ${JSON.stringify(tFor(lang, "exportUnsupportedPreviewText"))},
+    fileType: ${JSON.stringify(tFor(lang, "exportFileType"))},
+    downloadOffline: ${JSON.stringify(tFor(lang, "exportDownloadOffline"))},
+  };
+
+  function fmt(template, vars) {
+    var out = String(template || "");
+    vars = vars || {};
+
+    for (var k in vars) {
+      if (!Object.prototype.hasOwnProperty.call(vars, k)) continue;
+      var val = vars[k] == null ? "" : String(vars[k]);
+      out = out.split("{" + k + "}").join(val);
+    }
+
+    return out;
+  }
   const sc = document.getElementById("chatScroller");
   const btn = document.getElementById("btnBottom");
   const btnParticipants = document.getElementById("btnParticipants");
@@ -4552,7 +4639,7 @@ function buildHtml(items, stats, exportTitle, archiveRange, members, me) {
 
     const kind = getPreviewKind(name, mime);
 
-    filePreviewTitle.textContent = name || "File preview";
+    filePreviewTitle.textContent = name || TXT.filePreview;
     filePreviewSub.textContent = (mime || "application/octet-stream") + " • " + kind;
     clearFilePreview();
 
@@ -4597,14 +4684,14 @@ function buildHtml(items, stats, exportTitle, archiveRange, members, me) {
 
       const t = document.createElement("div");
       t.className = "filePreviewUnsupportedTitle";
-      t.textContent = "Прегледът не се поддържа офлайн за този файлов тип";
+      t.textContent = TXT.unsupportedPreviewTitle;
 
       const p = document.createElement("div");
       p.className = "filePreviewUnsupportedText";
             const typeInfo = document.createElement("div");
       typeInfo.className = "filePreviewUnsupportedText";
-      typeInfo.textContent = "Тип файл: " + (mime || "application/octet-stream");
-            p.textContent = "Файлът е вграден в архива и може да бъде свален локално, но този файлов тип не може да бъде визуализиран надеждно директно от браузъра в офлайн режим.";
+      typeInfo.textContent = TXT.fileType + ": " + (mime || "application/octet-stream");
+            p.textContent = TXT.unsupportedPreviewText;
 
       const actions = document.createElement("div");
       actions.className = "filePreviewActions";
@@ -4613,7 +4700,7 @@ function buildHtml(items, stats, exportTitle, archiveRange, members, me) {
       dl.className = "attDownload";
       dl.href = dataUrl;
       dl.download = name || "file";
-      dl.textContent = "Свали офлайн";
+      dl.textContent = TXT.downloadOffline;
 
       actions.appendChild(dl);
       wrap.appendChild(t);
@@ -4652,8 +4739,8 @@ function buildHtml(items, stats, exportTitle, archiveRange, members, me) {
     img.src = src;
     img.alt = alt || "image preview";
 
-    imageZoomTitle.textContent = alt || "Image preview";
-    imageZoomSub.textContent = "Натисни Esc или извън прозореца, за да затвориш";
+    imageZoomTitle.textContent = alt || TXT.imagePreview;
+    imageZoomSub.textContent = TXT.closeHint;
 
     imageZoomBody.appendChild(img);
     imageZoomModal.classList.add("open");
@@ -4762,7 +4849,12 @@ function buildHtml(items, stats, exportTitle, archiveRange, members, me) {
       const names = parseNames(chip);
 
       const reactionType = chip.getAttribute("data-reaction-type") || emoji;
-      title.textContent = emoji + " " + count + " reaction" + (count === "1" ? "" : "s") + " • " + reactionType;
+      title.textContent = fmt(TXT.reactionListTitle, {
+      emoji,
+      count,
+      s: count === "1" ? "" : "s",
+      reactionType,
+    });
       list.innerHTML = "";
 
       if (!names.length) {
@@ -4775,7 +4867,7 @@ function buildHtml(items, stats, exportTitle, archiveRange, members, me) {
 
         const nm = document.createElement("div");
         nm.className = "pName";
-        nm.textContent = "No participant names available";
+        nm.textContent = TXT.noParticipantNames;
 
         row.appendChild(av);
         row.appendChild(nm);
@@ -4958,6 +5050,7 @@ function resetCurrentBatchFolder() {
  * EXPORT PIPELINE
  * ========================= */
 async function exportChatToOfflineHtml(chat, me, usedFileNames = null, totalQueuedCount = 1) {
+  const exportLang = getCurrentLanguage();
   let members = Array.isArray(chat?.members) ? [...chat.members] : [];
 
   try {
@@ -5015,12 +5108,12 @@ async function exportChatToOfflineHtml(chat, me, usedFileNames = null, totalQueu
     const isEmojiOnly = !isSystemEvent && !isDeletedNotice && isEmojiOnlyHtml(bodyHtml);
 
     if (isDeletedNotice) {
-      bodyHtml = `<div class="deletedNoticeText">This message has been deleted.</div>`;
+      bodyHtml = `<div class="deletedNoticeText">${esc(tFor(exportLang, "exportDeletedMessage"))}</div>`;
     }
 
     if (isSystemEvent) {
       const systemText = extractSystemEventText(msg, bodyHtml, members, me);
-      bodyHtml = normalizeSystemEventHtml(systemText);
+      bodyHtml = normalizeSystemEventHtml(systemText, exportLang);
     }
 
     if (shouldAttemptHosted(bodyHtml)) {
@@ -5101,22 +5194,28 @@ async function exportChatToOfflineHtml(chat, me, usedFileNames = null, totalQueu
       quotes.push(q);
     }
 
-    dto.quoteHtml = renderQuoteStack(quotes);
+    dto.quoteHtml = renderQuoteStack(quotes, exportLang);
 
     const forwarded =
       (dto._forwardedAttachments && dto._forwardedAttachments[0]) ||
       extractForwardFromBody(dto._rawBodyHtml);
 
-    dto.forwardHtml = renderForwardBlock(forwarded);
+    dto.forwardHtml = renderForwardBlock(forwarded, exportLang);
   }
 
   const tokenToDataUrl = await embedFileAttachments(fileTokenToMeta, stats);
   for (const dto of dtos) {
-    dto.bodyHtml = replaceFileTokensOffline(dto.bodyHtml, tokenToDataUrl, fileTokenToMeta, stats);
+    dto.bodyHtml = replaceFileTokensOffline(
+      dto.bodyHtml,
+      tokenToDataUrl,
+      fileTokenToMeta,
+      stats,
+      exportLang
+    );
   }
 
   const archiveRange = getArchiveRange(dtos);
-  const html = buildHtml(dtos, stats, exportTitle, archiveRange, members, me);
+  const html = buildHtml(dtos, stats, exportTitle, archiveRange, members, me, exportLang);
 
   const saveInfo = await saveExportHtmlFile(outName, html, totalQueuedCount);
 
@@ -5134,10 +5233,10 @@ async function exportChatToOfflineHtml(chat, me, usedFileNames = null, totalQueu
  * QUEUE HELPERS
  * ========================= */
 function getQueueStatusLabel(status) {
-  if (status === "queued") return "Queued";
-  if (status === "running") return "Running";
-  if (status === "done") return "Done";
-  if (status === "failed") return "Failed";
+  if (status === "queued") return t("statusQueued");
+  if (status === "running") return t("statusRunning");
+  if (status === "done") return t("statusDone");
+  if (status === "failed") return t("statusFailed");
   return status || "";
 }
 
@@ -5200,13 +5299,13 @@ function requeueFailedOnly() {
 async function runExportQueue() {
   if (_queueRunning) return;
   if (!_me) {
-    log("Please login first.");
+    log(t("pleaseLoginFirst"));
     return;
   }
 
   const queued = _queueItems.filter((x) => x.status === "queued");
   if (!queued.length) {
-    log("No queued chats to export.");
+    log(t("noQueuedChats"));
     return;
   }
 
@@ -5216,16 +5315,16 @@ async function runExportQueue() {
   setCounts();
   setBusy(true);
 
-  appendLogLine(`Queue start: ${queued.length} chat(s).`);
+  appendLogLine(t("queueStart", { count: queued.length }));
 
   if (supportsFolderExport()) {
     try {
       await ensureBatchFolderHandle(queued.length);
 
       if (queued.length > 1 && _currentBatchFolderName) {
-        appendLogLine(`Exports will be saved in subfolder: ${_currentBatchFolderName}`);
+        appendLogLine(t("exportFolderSubfolder", { folder: _currentBatchFolderName }));
       } else {
-        appendLogLine(`Export folder selected successfully.`);
+        appendLogLine(t("exportFolderSelected"));
       }
     } catch (e) {
       _queueRunning = false;
@@ -5243,16 +5342,16 @@ async function runExportQueue() {
         msg.includes("user cancelled") ||
         msg.includes("user canceled")
       ) {
-        appendLogLine("Export folder selection was cancelled.");
+        appendLogLine(t("exportFolderCancelled"));
       } else {
-        appendLogLine(`Export folder selection failed: ${normalizeErrorMessage(e)}`);
+        appendLogLine(t("exportFolderFailed", { message: normalizeErrorMessage(e) }));
       }
 
       return;
     }
   } else {
-    appendLogLine("File System Access API is not available. Falling back to browser downloads.");
-    appendLogLine("Note: browser may ask to allow multiple automatic downloads for this site.");
+        appendLogLine(t("fsApiFallback"));
+        appendLogLine(t("allowMultipleDownloads"));
   }
 
   const usedFileNames = new Set(
@@ -5277,7 +5376,12 @@ async function runExportQueue() {
 
         renderChats();
         setCounts();
-        appendLogLine(`FAILED: ${item.title} -> ${formatFailureForLog(item)}`);
+        appendLogLine(
+          t("queueItemFailed", {
+            title: item.title,
+            details: formatFailureForLog(item),
+          })
+        );
         continue;
       }
 
@@ -5290,7 +5394,11 @@ async function runExportQueue() {
       renderChats();
       setCounts();
       setBusy(true);
-      appendLogLine(`RUNNING: ${item.title}`);
+      appendLogLine(
+        t("queueItemRunning", {
+          title: item.title,
+        })
+      );
 
       try {
         const res = await exportChatToOfflineHtml(chat, _me, usedFileNames, queued.length);
@@ -5299,7 +5407,12 @@ async function runExportQueue() {
         item.finishedAt = new Date().toISOString();
 
         appendLogLine(
-          `DONE: ${item.title} -> ${res.outName} (${res.items} items, period ${res.archiveRange?.label || "—"})`
+          t("queueItemDone", {
+            title: item.title,
+            file: res.outName,
+            items: res.items,
+            period: res.archiveRange?.label || "—",
+          })
         );
         setBusy(true);
       } catch (e) {
@@ -5313,7 +5426,12 @@ async function runExportQueue() {
         item.errorCode = cls.code;
         item.errorHuman = cls.human;
 
-        appendLogLine(`FAILED: ${item.title} -> ${formatFailureForLog(item)}`);
+        appendLogLine(
+          t("queueItemFailed", {
+            title: item.title,
+            details: formatFailureForLog(item),
+          })
+        );
         setBusy(true);
       }
 
@@ -5323,7 +5441,13 @@ async function runExportQueue() {
     }
 
     const qc = getQueueSummaryCounts();
-    appendLogLine(`Queue finished. Done: ${qc.done}, Failed: ${qc.failed}, Total: ${_queueItems.length}`);
+    appendLogLine(
+      t("queueFinishedSummary", {
+        done: qc.done,
+        failed: qc.failed,
+        total: _queueItems.length,
+      })
+    );
   } finally {
     _queueRunning = false;
     resetCurrentBatchFolder();
@@ -5399,7 +5523,7 @@ function renderChats() {
     const started = getChatStartedLabel(c);
     const lastWritten = getChatLastMessageLabel(c);
     meta.textContent =
-      `Started: ${started} • Last message: ${lastWritten}${queueItem ? ` • Queue: ${getQueueStatusLabel(queueItem.status)}` : ""}`;
+      `${t("chatStarted")}: ${started} • ${t("lastMessage")}: ${lastWritten}${queueItem ? ` • ${t("queueLabel")}: ${getQueueStatusLabel(queueItem.status)}` : ""}`;
 
     main.appendChild(title);
     main.appendChild(meta);
@@ -5407,11 +5531,11 @@ function renderChats() {
     if (queueItem?.status === "failed") {
       const err1 = document.createElement("div");
       err1.className = "chatError";
-      err1.textContent = `Reason: ${queueItem.errorHuman || queueItem.error || "Unknown error"}`;
+      err1.textContent = `${t("reason")}: ${queueItem.errorHuman || queueItem.error || t("unknownError")}`;
 
       const err2 = document.createElement("div");
       err2.className = "chatErrorMeta";
-      err2.textContent = `Stage: ${queueItem.errorStage || "unknown"} • Code: ${queueItem.errorCode || "unknown"}`;
+      err2.textContent = `${t("stage")}: ${queueItem.errorStage || "unknown"} • ${t("code")}: ${queueItem.errorCode || "unknown"}`;
 
       main.appendChild(err1);
       main.appendChild(err2);
@@ -5454,18 +5578,17 @@ function renderChats() {
     ui.chatList.appendChild(row);
   }
 }
-
 /** =========================
  * UI ACTIONS
  * ========================= */
 async function onExportSelectedClick() {
   if (!_me) {
-    log("Please login first.");
+    log(t("pleaseLoginFirst"));
     return;
   }
 
   if (_selectedChatIds.size === 0) {
-    log("Please select at least one chat first.");
+    log(t("selectAtLeastOneChat"));
     return;
   }
 
@@ -5475,18 +5598,22 @@ async function onExportSelectedClick() {
   renderChats();
   setCounts();
 
-  appendLogLine(`Queue prepared: added ${info.added} / selected ${info.totalSelected}.`);
+  appendLogLine(t("queuePrepared", {
+    added: info.added,
+    totalSelected: info.totalSelected,
+  }));
+
   await runExportQueue();
 }
 
 async function onQueueAllClick() {
   if (!_me) {
-    log("Please login first.");
+    log(t("pleaseLoginFirst"));
     return;
   }
 
   if (_chats.length === 0) {
-    log("Load chats first.");
+    log(t("loadChatsFirst"));
     return;
   }
 
@@ -5496,19 +5623,23 @@ async function onQueueAllClick() {
   renderChats();
   setCounts();
 
-  appendLogLine(`Queue ALL prepared: added ${info.added} / total chats ${_chats.length}.`);
+  appendLogLine(t("queueAllPrepared", {
+    added: info.added,
+    total: _chats.length,
+  }));
+
   await runExportQueue();
 }
 
 async function onRetryFailedOnlyClick() {
   if (!_me) {
-    log("Please login first.");
+    log(t("pleaseLoginFirst"));
     return;
   }
 
   const failedCount = getQueueSummaryCounts().failed;
   if (!failedCount) {
-    log("There are no failed chats to retry.");
+    log(t("noFailedChats"));
     return;
   }
 
@@ -5518,7 +5649,10 @@ async function onRetryFailedOnlyClick() {
   renderChats();
   setCounts();
 
-  appendLogLine(`Retry FAILED only: re-queued ${changed} chat(s).`);
+  appendLogLine(t("retryFailedPrepared", {
+    count: changed,
+  }));
+
   await runExportQueue();
 }
 
@@ -5532,13 +5666,13 @@ function bindUiEvents() {
   ui.btnLogin?.addEventListener("click", async () => {
     try {
       setBusy(true);
-      appendLogLine("Login button clicked.");
+      appendLogLine(t("loginButtonClicked"));
       await login();
     } catch (e) {
       console.error(e);
       const msg = normalizeErrorMessage(e);
-      appendLogLine(`Login error: ${msg}`);
-      alert(`Login error:\n${msg}`);
+      appendLogLine(`${t("loginError")}: ${msg}`);
+      alert(`${t("loginError")}:\n${msg}`);
     } finally {
       setBusy(false);
       setCounts();
@@ -5548,12 +5682,12 @@ function bindUiEvents() {
   ui.btnChats?.addEventListener("click", async () => {
     try {
       if (!_me) {
-        log("Please login first.");
+        log(t("pleaseLoginFirst"));
         return;
       }
 
       setBusy(true);
-      log("Loading chats…");
+      log(t("loadingChats"));
 
       _chats = await loadMyChats();
 
@@ -5565,10 +5699,10 @@ function bindUiEvents() {
       setCounts();
 
       log({ chats: _chats.length, sample: _chats.slice(0, 3) });
-      appendLogLine(`Chats loaded successfully: ${_chats.length}`);
+      appendLogLine(t("chatsLoaded", { count: _chats.length }));
     } catch (e) {
       console.error(e);
-      log(`Load chats failed:\n${normalizeErrorMessage(e)}`);
+      log(`${t("loadChatsFailed")}:\n${normalizeErrorMessage(e)}`);
     } finally {
       setBusy(false);
       setCounts();
@@ -5582,7 +5716,7 @@ function bindUiEvents() {
       await onExportSelectedClick();
     } catch (e) {
       console.error(e);
-      log(`Export queue failed:\n${normalizeErrorMessage(e)}`);
+      log(`${t("exportQueueFailed")}:\n${normalizeErrorMessage(e)}`);
     } finally {
       setBusy(false);
       setCounts();
@@ -5595,7 +5729,7 @@ function bindUiEvents() {
         await onQueueAllClick();
       } catch (e) {
         console.error(e);
-        log(`Queue all failed:\n${normalizeErrorMessage(e)}`);
+        log(`${t("queueAllFailed")}:\n${normalizeErrorMessage(e)}`);
       } finally {
         setBusy(false);
         setCounts();
@@ -5608,7 +5742,7 @@ function bindUiEvents() {
         await onRetryFailedOnlyClick();
       } catch (e) {
         console.error(e);
-        log(`Retry failed only error:\n${normalizeErrorMessage(e)}`);
+        log(`${t("retryFailedError")}:\n${normalizeErrorMessage(e)}`);
       } finally {
         setBusy(false);
         setCounts();
@@ -5621,16 +5755,21 @@ function bindUiEvents() {
  * INIT
  * ========================= */
 async function doInit() {
+  refreshUiRefs();
+  populateLanguageSelector();
+
   if (!assertUiIds()) return;
 
   ensureExtraButtons();
   refreshUiRefs();
+  bindLanguageSelector();
   bindUiEvents();
+  applyLanguageToUi();
   showLoginView();
 
-    try {
+  try {
     setBusy(true);
-    log("Initializing auth…");
+    log(t("initializingAuth"));
 
     const acc = await initAuth();
 
@@ -5647,15 +5786,18 @@ async function doInit() {
       else recordAuthenticatedSession({ reset: false });
 
       showAppView();
-      appendLogLine(`Ready. Signed in as ${_me.displayName || _me.userPrincipalName || _me.id}`);
+      appendLogLine(t("readySignedInAs", {
+        name: _me.displayName || _me.userPrincipalName || _me.id,
+      }));
     } else {
       _me = null;
       clearAppSessionMeta();
       showLoginView();
-      log("Not signed in. Use the Microsoft sign-in button.");
+      log(t("notSignedInUseButton"));
     }
 
     setCounts();
+    applyLanguageToUi();
   } catch (e) {
     console.error(e);
 
@@ -5665,15 +5807,17 @@ async function doInit() {
       clearAppSessionMeta();
       showLoginView();
       setCounts();
+      applyLanguageToUi();
       return;
     }
 
     showLoginView();
-    log(`Init failed:\n${normalizeErrorMessage(e)}`);
-    alert(`Init failed:\n${normalizeErrorMessage(e)}`);
+    log(`${t("initFailed")}:\n${normalizeErrorMessage(e)}`);
+    alert(`${t("initFailed")}:\n${normalizeErrorMessage(e)}`);
   } finally {
     setBusy(false);
     setCounts();
+    applyLanguageToUi();
   }
 }
 
