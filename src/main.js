@@ -69,8 +69,11 @@ const LIMITS = {
   MAX_IMAGE_BYTES_EACH: 10 * 1024 * 1024,
   MAX_IMAGE_BYTES_TOTAL: 120 * 1024 * 1024,
 
-  MAX_ATTACH_BYTES_EACH: 250 * 1024 * 1024,
-  MAX_ATTACH_BYTES_TOTAL: 1200 * 1024 * 1024,
+  // New file policy:
+  // - embed everything automatically up to 600 MB per file
+  // - no confirmation prompts during export
+  MAX_ATTACH_BYTES_EACH: 600 * 1024 * 1024,
+  MAX_ATTACH_BYTES_TOTAL: 20 * 1024 * 1024 * 1024,
 
   MAX_PAGES: 200000,
   DL_CONCURRENCY: 6,
@@ -88,7 +91,7 @@ const SCOPES = [
   "Chat.Read",
   "offline_access",
   "Files.Read.All",
-  // "Sites.Read.All",
+  "Sites.Read.All",
 ];
 
 /** =========================
@@ -277,6 +280,7 @@ let _selectedChatIds = new Set();
 
 let _queueItems = [];
 let _queueRunning = false;
+let _lastExportSummary = null;
 
 let _loginAtMs = 0;
 let _exportStartedSinceLogin = false;
@@ -489,20 +493,6 @@ function isDeletedMessage(msg, bodyHtml = "") {
   }
 
   return false;
-}
-
-function confirmLargeFileEmbed(fileName, sizeBytes, reason) {
-  const sizeLabel = formatBytesHuman(sizeBytes);
-
-  const msg =
-    `Файл: ${fileName}\nРазмер: ${sizeLabel}\n\n` +
-    (reason === "total_limit"
-      ? "Този файл ще надвиши общия размер на архива."
-      : "Файлът е прекалено голям за безопасно вграждане.") +
-    "\n\nТова може да направи HTML архива бавен или нестабилен.\n\n" +
-    "Искаш ли все пак да бъде вграден?";
-
-  return window.confirm(msg);
 }
 
 function formatBytesHuman(bytes) {
@@ -1588,9 +1578,22 @@ async function loadChatMembersCached(chatId) {
     return _chatMembersCache.get(key);
   }
 
-  const members = await loadChatMembers(key);
-  _chatMembersCache.set(key, members || []);
-  return members || [];
+  if (isUnsupportedMembersEndpointChatId(key)) {
+    _chatMembersCache.set(key, []);
+    return [];
+  }
+
+  try {
+    const members = await loadChatMembers(key);
+    _chatMembersCache.set(key, members || []);
+    return members || [];
+  } catch (e) {
+    const msg = normalizeErrorMessage(e);
+    console.warn("[CHAT MEMBERS LOAD FAILED]", { chatId: key, error: msg });
+
+    _chatMembersCache.set(key, []);
+    return [];
+  }
 }
 
 async function loadSingleChatMessage(chatId, messageId) {
@@ -1641,26 +1644,6 @@ function getChatTitle(chat) {
   }
 
   return names.length ? names.join(", ") : "Chat";
-}
-
-function fileBaseForChat(chat, me, members) {
-  const chatType = String(chat?.chatType || "").toLowerCase();
-
-  if (chatType === "group" || chatType === "meeting") {
-    return safeFileName(chat?.topic || "Group chat");
-  }
-
-  if (chatType === "oneonone") {
-    const myName = (me?.displayName || "").trim();
-    const names = (members || [])
-      .map((m) => (m?.displayName || "").trim())
-      .filter(Boolean)
-      .filter((n) => !myName || n !== myName);
-
-    return safeFileName(names.length ? names.join(" & ") : "1on1_chat");
-  }
-
-  return safeFileName(chatDisplayName(chat, members) || "Chat");
 }
 
 function extractSender(msg) {
@@ -1954,57 +1937,6 @@ function getDeepStringValues(obj) {
   return out;
 }
 
-async function fetchAsDataUrl(url, accessToken) {
-  const res = await fetch(url, {
-    headers: {
-      Authorization: `Bearer ${accessToken}`,
-    },
-  });
-
-  const buffer = await res.arrayBuffer();
-  const bytes = new Uint8Array(buffer);
-
-  let binary = "";
-  const chunkSize = 0x8000;
-
-  for (let i = 0; i < bytes.length; i += chunkSize) {
-    const subarray = bytes.subarray(i, i + chunkSize);
-    binary += String.fromCharCode(...subarray);
-  }
-
-  const base64 = btoa(binary);
-  const contentType = res.headers.get("content-type") || "application/octet-stream";
-
-  return `data:${contentType};base64,${base64}`;
-}
-
-function renderAttachment(att) {
-  const { contentType, dataUrl, fileName } = att;
-
-  if (!dataUrl) {
-    return `<div class="attachment-warning">⚠️ File not available offline: ${fileName}</div>`;
-  }
-
-  if (contentType.startsWith("image/")) {
-    return `<img src="${dataUrl}" class="chat-image" />`;
-  }
-
-  if (contentType.startsWith("video/")) {
-    return `
-      <video controls class="chat-video">
-        <source src="${dataUrl}" type="${contentType}" />
-        Your browser does not support the video tag.
-      </video>
-    `;
-  }
-
-  if (contentType.startsWith("text/")) {
-    return `<pre class="chat-text-file">${escapeHtml(atob(dataUrl.split(",")[1]))}</pre>`;
-  }
-
-  return `<div class="attachment-warning">📎 ${fileName} (preview not supported)</div>`;
-}
-
 function extractRenameTargetName(eventDetail) {
   const isTeamsOpaqueId = (value) => {
     const s = String(value || "").trim();
@@ -2277,25 +2209,6 @@ function normalizeSystemEventHtml(input, lang) {
       ? `<div class="systemEventText">${esc(text)}</div>`
       : `<div class="systemEventText">${esc(fallback)}</div>`;
   }
-}
-
-function extractUserIdsFromEventDetail(eventDetail) {
-  const ids = new Set();
-
-  function walk(obj) {
-    if (!obj || typeof obj !== "object") return;
-
-    if (typeof obj.id === "string" && obj.id.length > 20) {
-      ids.add(obj.id);
-    }
-
-    for (const v of Object.values(obj)) {
-      if (typeof v === "object") walk(v);
-    }
-  }
-
-  walk(eventDetail);
-  return Array.from(ids);
 }
 
 function isSystemEventMessage(msg, bodyHtml = "") {
@@ -2717,10 +2630,20 @@ function toShareIdFromUrl(sharingUrl) {
   return `u!${b64url}`;
 }
 
-async function getDriveItemFromSharingUrl(sharingUrl) {
-  const shareId = toShareIdFromUrl(sharingUrl);
-  return await graphFetch(`/shares/${encodeURIComponent(shareId)}/driveItem`);
+function isUnsupportedMembersEndpointChatId(chatId) {
+  const s = String(chatId || "").trim().toLowerCase();
+  if (!s) return false;
+
+  return s.includes("@unq.gbl.spaces");
 }
+
+async function tryResolveDriveItemFromMeDrivePath(relativePath) {
+  const p = String(relativePath || "").trim();
+  if (!p) throw new Error("me_drive_relative_path_missing");
+
+  return await graphFetch(`/me/drive/root:/${p}`);
+}
+
 
 async function downloadDriveItemContent(driveId, itemId) {
   const token = await getAccessToken();
@@ -3035,16 +2958,32 @@ function splitQuotesFromAttachments(attachments) {
   return { quotes, fileAttachments };
 }
 
-function tokenizeFileAttachments(bodyHtml, attachments, fileTokenToMeta) {
+function tokenizeFileAttachments(bodyHtml, attachments, fileTokenToMeta, context = {}) {
   let html = bodyHtml || "";
   if (!Array.isArray(attachments) || !attachments.length) return html;
 
   let seq = fileTokenToMeta.__seq || 0;
 
+  const chatTitle = String(context.chatTitle || "").trim();
+  const messageCreatedDateTime = String(context.messageCreatedDateTime || "").trim();
+  const messageCreatedLabel = String(context.messageCreatedLabel || "").trim();
+
   for (const a of attachments) {
     const name = (a?.name || a?.contentUrl || a?.id || "attachment").toString().trim();
     const contentType = String(a?.contentType || "").trim().toLowerCase();
     const contentUrl = String(a?.contentUrl || "").trim();
+    const size =
+      typeof a?.size === "number" && a.size > 0
+        ? a.size
+        : (typeof a?.contentBytes === "string" ? Math.floor((a.contentBytes.length * 3) / 4) : 0);
+
+    const commonMeta = {
+      chatTitle,
+      messageCreatedDateTime,
+      messageCreatedLabel,
+      size,
+      rawAttachment: a,
+    };
 
     if (a?.contentBytes && a?.contentType) {
       const token = `FILE_${++seq}`;
@@ -3054,7 +2993,7 @@ function tokenizeFileAttachments(bodyHtml, attachments, fileTokenToMeta) {
         contentType: a.contentType,
         contentBytes: a.contentBytes,
         url: "",
-        rawAttachment: a,
+        ...commonMeta,
       });
       html += `<div data-file-token="${token}">📎 ${esc(name)}</div>`;
       continue;
@@ -3067,7 +3006,7 @@ function tokenizeFileAttachments(bodyHtml, attachments, fileTokenToMeta) {
         kind: "shareLink",
         url: contentUrl,
         contentType,
-        rawAttachment: a,
+        ...commonMeta,
       });
       html += `<div data-file-token="${token}">📎 ${esc(name)}</div>`;
       continue;
@@ -3079,7 +3018,7 @@ function tokenizeFileAttachments(bodyHtml, attachments, fileTokenToMeta) {
       kind: "unknown",
       url: "",
       contentType,
-      rawAttachment: a,
+      ...commonMeta,
     });
     html += `<div data-file-token="${token}">📎 ${esc(name)}</div>`;
   }
@@ -3112,7 +3051,7 @@ async function embedFileAttachments(fileTokenToMeta, stats) {
     try {
       let blob = null;
       let mime = String(meta?.contentType || "").trim() || "application/octet-stream";
-      let fileSize = 0;
+      let fileSize = Number(meta?.size || 0);
 
       if (meta?.kind === "inline" && meta?.contentBytes && meta?.contentType) {
         mime = meta.contentType || "application/octet-stream";
@@ -3133,7 +3072,7 @@ async function embedFileAttachments(fileTokenToMeta, stats) {
           meta?.contentType ||
           driveItem?.file?.mimeType ||
           "application/octet-stream";
-        fileSize = blob?.size || 0;
+        fileSize = blob?.size || fileSize || 0;
       } else if (meta?.kind === "unknown") {
         console.warn("[ATTACHMENT UNRESOLVED]", {
           token,
@@ -3159,31 +3098,32 @@ async function embedFileAttachments(fileTokenToMeta, stats) {
         throw new Error("blob_empty");
       }
 
-      let requireConfirm = false;
-      let reason = "";
-
       if (fileSize > LIMITS.MAX_ATTACH_BYTES_EACH) {
-        requireConfirm = true;
-        reason = "single_limit";
+        if (!Array.isArray(stats.skippedLargeFiles)) {
+          stats.skippedLargeFiles = [];
+        }
+
+        stats.skippedLargeFiles.push({
+          chatTitle: meta?.chatTitle || "",
+          fileName,
+          sizeBytes: fileSize,
+          sentAt: meta?.messageCreatedDateTime || "",
+          sentAtLabel: meta?.messageCreatedLabel || "",
+        });
+
+        stats.failures.push({
+          kind: "attachment",
+          stage: "embedFileAttachments",
+          token,
+          fileName,
+          error: "too_large_each",
+        });
+
+        continue;
       }
 
       if (total + fileSize > LIMITS.MAX_ATTACH_BYTES_TOTAL) {
-        requireConfirm = true;
-        reason = "total_limit";
-      }
-
-      if (requireConfirm) {
-        const ok = confirmLargeFileEmbed(fileName, fileSize, reason);
-        if (!ok) {
-          stats.failures.push({
-            kind: "attachment",
-            stage: "embedFileAttachments",
-            token,
-            fileName,
-            error: "user_declined_large_embed",
-          });
-          continue;
-        }
+        throw new Error("too_large_total");
       }
 
       const dataUrl = await blobToDataUrl(blob);
@@ -3236,7 +3176,7 @@ function replaceFileTokensOffline(html, tokenToDataUrl, fileTokenToMeta, stats =
             <div class="attIcon">📎</div>
             <div class="attMain">
               <div class="attName" title="${esc(fileName)}">${esc(fileName)}</div>
-              <div class="attMeta">${esc(sizeLabel)}${sizeLabel ? " • " : ""}${esc(mime)}</div>
+              ${sizeLabel ? `<div class="attMeta">${esc(sizeLabel)}</div>` : ``}
             </div>
             <div class="attActions">
               <button
@@ -3289,6 +3229,356 @@ function replaceFileTokensOffline(html, tokenToDataUrl, fileTokenToMeta, stats =
   );
 
   return out;
+}
+
+function parsePersonalSharePointUrl(rawUrl) {
+  const s = String(rawUrl || "").trim();
+  if (!s) return null;
+
+  try {
+    const u = new URL(s);
+    const host = String(u.hostname || "").toLowerCase();
+    const path = String(u.pathname || "");
+
+    if (!host.includes("-my.sharepoint.com")) return null;
+
+    const m = path.match(/^\/personal\/([^/]+)\/Documents\/(.+)$/i);
+    if (!m) return null;
+
+    const ownerAlias = decodeURIComponent(m[1] || "").trim();
+    const relativePathAfterDocuments = decodeURIComponent(m[2] || "")
+      .replace(/^\/+/, "")
+      .replace(/\\/g, "/")
+      .trim();
+
+    if (!ownerAlias || !relativePathAfterDocuments) return null;
+
+    const personalSitePath = `/personal/${ownerAlias}`;
+
+    return {
+      host,
+      personalSitePath,
+      ownerAlias,
+      relativePathAfterDocuments,
+      fileName: relativePathAfterDocuments.split("/").pop() || "",
+    };
+  } catch {
+    return null;
+  }
+}
+
+function buildPossibleUpnsFromPersonalAlias(alias) {
+  const raw = String(alias || "").trim().toLowerCase();
+  const out = new Set();
+
+  if (raw) {
+    const parts = raw.split("_").filter(Boolean);
+
+    if (parts.length >= 3) {
+      const domainLast = parts[parts.length - 1];
+      const domainFirst = parts[parts.length - 2];
+      const localParts = parts.slice(0, -2);
+
+      const domain = `${domainFirst}.${domainLast}`;
+      const localUnderscore = localParts.join("_");
+      const localDot = localParts.join(".");
+      const localFlat = localParts.join("");
+
+      if (localUnderscore) out.add(`${localUnderscore}@${domain}`);
+      if (localDot) out.add(`${localDot}@${domain}`);
+      if (localFlat) out.add(`${localFlat}@${domain}`);
+    }
+  }
+
+  // Add exact signed-in user identity as strongest fallback
+  if (_me?.userPrincipalName) out.add(String(_me.userPrincipalName).trim().toLowerCase());
+  if (_me?.mail) out.add(String(_me.mail).trim().toLowerCase());
+
+  return [...out].filter(Boolean);
+}
+
+async function trySearchDriveItemInMeDrive(fileName, folderHint = "") {
+  const name = String(fileName || "").trim();
+  const hint = String(folderHint || "").trim().toLowerCase();
+
+  if (!name) throw new Error("me_drive_search_name_missing");
+
+  const data = await graphFetch(
+    `/me/drive/root/search(q='${name.replaceAll("'", "''")}')`
+  );
+
+  const list = Array.isArray(data?.value) ? data.value : [];
+  if (!list.length) throw new Error("me_drive_search_empty");
+
+  const ranked = [...list].sort((a, b) => {
+    const aPath = String(a?.parentReference?.path || "").toLowerCase();
+    const bPath = String(b?.parentReference?.path || "").toLowerCase();
+
+    const aHint = hint && aPath.includes(hint) ? 1 : 0;
+    const bHint = hint && bPath.includes(hint) ? 1 : 0;
+    if (aHint !== bHint) return bHint - aHint;
+
+    const aName = String(a?.name || "").toLowerCase();
+    const bName = String(b?.name || "").toLowerCase();
+    const want = name.toLowerCase();
+
+    const aExact = aName === want ? 1 : 0;
+    const bExact = bName === want ? 1 : 0;
+    if (aExact !== bExact) return bExact - aExact;
+
+    return 0;
+  });
+
+  return ranked[0] || null;
+}
+
+async function trySearchDriveItemInUserDrive(userIdOrUpn, fileName, folderHint = "") {
+  const u = String(userIdOrUpn || "").trim();
+  const name = String(fileName || "").trim();
+  const hint = String(folderHint || "").trim().toLowerCase();
+
+  if (!u) throw new Error("user_drive_search_user_missing");
+  if (!name) throw new Error("user_drive_search_name_missing");
+
+  const data = await graphFetch(
+    `/users/${encodeURIComponent(u)}/drive/root/search(q='${name.replaceAll("'", "''")}')`
+  );
+
+  const list = Array.isArray(data?.value) ? data.value : [];
+  if (!list.length) throw new Error("user_drive_search_empty");
+
+  const ranked = [...list].sort((a, b) => {
+    const aPath = String(a?.parentReference?.path || "").toLowerCase();
+    const bPath = String(b?.parentReference?.path || "").toLowerCase();
+
+    const aHint = hint && aPath.includes(hint) ? 1 : 0;
+    const bHint = hint && bPath.includes(hint) ? 1 : 0;
+    if (aHint !== bHint) return bHint - aHint;
+
+    const aName = String(a?.name || "").toLowerCase();
+    const bName = String(b?.name || "").toLowerCase();
+    const want = name.toLowerCase();
+
+    const aExact = aName === want ? 1 : 0;
+    const bExact = bName === want ? 1 : 0;
+    if (aExact !== bExact) return bExact - aExact;
+
+    return 0;
+  });
+
+  return ranked[0] || null;
+}
+
+async function tryResolvePersonalSite(siteHost, personalSitePath) {
+  const host = String(siteHost || "").trim().toLowerCase();
+  const sitePath = String(personalSitePath || "").trim();
+
+  if (!host) throw new Error("personal_site_host_missing");
+  if (!sitePath) throw new Error("personal_site_path_missing");
+
+  const normalizedPath = sitePath.startsWith("/") ? sitePath : `/${sitePath}`;
+
+  return await graphFetch(`/sites/${host}:${normalizedPath}`);
+}
+
+async function getDriveItemFromSharingUrl(sharingUrl) {
+  const url = String(sharingUrl || "").trim();
+  if (!url) {
+    throw new Error("sharing_url_missing");
+  }
+
+  // 1) Primary path: shares API
+  try {
+    const shareId = toShareIdFromUrl(url);
+    return await graphFetch(`/shares/${encodeURIComponent(shareId)}/driveItem`);
+  } catch (shareErr) {
+    const personalInfo = parsePersonalSharePointUrl(url);
+
+    if (!personalInfo) {
+      throw shareErr;
+    }
+
+    const {
+      host,
+      personalSitePath,
+      relativePathAfterDocuments,
+      fileName,
+      ownerAlias,
+    } = personalInfo;
+
+    let mePathErr = null;
+    let meSearchErr = null;
+    let ownerPathErr = null;
+    let ownerSearchErr = null;
+    let siteResolveErr = null;
+    let sitePathErr = null;
+    let siteSearchErr = null;
+
+    // 2) current signed-in drive exact path
+    try {
+      return await tryResolveDriveItemFromMeDrivePath(relativePathAfterDocuments);
+    } catch (err) {
+      mePathErr = err;
+    }
+
+    // 3) current signed-in drive search
+    try {
+      const foundInMe = await trySearchDriveItemInMeDrive(
+        fileName,
+        "microsoft teams chat files"
+      );
+
+      if (foundInMe?.id && foundInMe?.parentReference?.driveId) {
+        return foundInMe;
+      }
+
+      meSearchErr = new Error("me_drive_search_no_matching_item");
+    } catch (err) {
+      meSearchErr = err;
+    }
+
+    // 4) user-drive candidates
+    const ownerCandidates = buildPossibleUpnsFromPersonalAlias(ownerAlias);
+
+    console.warn("[SHARE OWNER CANDIDATES]", {
+      ownerAlias,
+      me: _me,
+      ownerCandidates,
+      relativePathAfterDocuments,
+      fileName,
+      host,
+      personalSitePath,
+    });
+
+    for (const candidate of ownerCandidates) {
+      try {
+        return await tryResolveDriveItemFromUserDrivePath(
+          candidate,
+          relativePathAfterDocuments
+        );
+      } catch (err) {
+        ownerPathErr = err;
+      }
+    }
+
+    for (const candidate of ownerCandidates) {
+      try {
+        const found = await trySearchDriveItemInUserDrive(
+          candidate,
+          fileName,
+          "microsoft teams chat files"
+        );
+
+        if (found?.id && found?.parentReference?.driveId) {
+          return found;
+        }
+
+        ownerSearchErr = new Error("user_drive_search_no_matching_item");
+      } catch (err) {
+        ownerSearchErr = err;
+      }
+    }
+
+    // 5) personal site resolution
+    let site = null;
+    try {
+      site = await tryResolvePersonalSite(host, personalSitePath);
+    } catch (err) {
+      siteResolveErr = err;
+    }
+
+    const siteId = String(site?.id || "").trim();
+
+    // 6) site drive exact path
+    if (siteId) {
+      try {
+        return await tryResolveDriveItemFromSiteDrivePath(
+          siteId,
+          relativePathAfterDocuments
+        );
+      } catch (err) {
+        sitePathErr = err;
+      }
+
+      // 7) site drive search
+      try {
+        const foundInSite = await trySearchDriveItemInSiteDrive(
+          siteId,
+          fileName,
+          "microsoft teams chat files"
+        );
+
+        if (foundInSite?.id && foundInSite?.parentReference?.driveId) {
+          return foundInSite;
+        }
+
+        siteSearchErr = new Error("site_drive_search_no_matching_item");
+      } catch (err) {
+        siteSearchErr = err;
+      }
+    }
+
+    throw new Error(
+      `share_me_full_resolution_failed | share=${normalizeErrorMessage(shareErr)} | mePath=${normalizeErrorMessage(mePathErr)} | meSearch=${normalizeErrorMessage(meSearchErr)} | ownerCandidates=${ownerCandidates.join(",")} | ownerPath=${normalizeErrorMessage(ownerPathErr)} | ownerSearch=${normalizeErrorMessage(ownerSearchErr)} | siteResolve=${normalizeErrorMessage(siteResolveErr)} | sitePath=${normalizeErrorMessage(sitePathErr)} | siteSearch=${normalizeErrorMessage(siteSearchErr)}`
+    );
+  }
+}
+
+async function tryResolveDriveItemFromSiteDrivePath(siteId, relativePath) {
+  const sid = String(siteId || "").trim();
+  const p = String(relativePath || "").trim();
+
+  if (!sid) throw new Error("site_id_missing");
+  if (!p) throw new Error("site_drive_relative_path_missing");
+
+  return await graphFetch(`/sites/${encodeURIComponent(sid)}/drive/root:/${p}`);
+}
+
+async function trySearchDriveItemInSiteDrive(siteId, fileName, folderHint = "") {
+  const sid = String(siteId || "").trim();
+  const name = String(fileName || "").trim();
+  const hint = String(folderHint || "").trim().toLowerCase();
+
+  if (!sid) throw new Error("site_search_site_id_missing");
+  if (!name) throw new Error("site_search_name_missing");
+
+  const data = await graphFetch(
+    `/sites/${encodeURIComponent(sid)}/drive/root/search(q='${name.replaceAll("'", "''")}')`
+  );
+
+  const list = Array.isArray(data?.value) ? data.value : [];
+  if (!list.length) throw new Error("site_drive_search_empty");
+
+  const ranked = [...list].sort((a, b) => {
+    const aPath = String(a?.parentReference?.path || "").toLowerCase();
+    const bPath = String(b?.parentReference?.path || "").toLowerCase();
+
+    const aHint = hint && aPath.includes(hint) ? 1 : 0;
+    const bHint = hint && bPath.includes(hint) ? 1 : 0;
+    if (aHint !== bHint) return bHint - aHint;
+
+    const aName = String(a?.name || "").toLowerCase();
+    const bName = String(b?.name || "").toLowerCase();
+    const want = name.toLowerCase();
+
+    const aExact = aName === want ? 1 : 0;
+    const bExact = bName === want ? 1 : 0;
+    if (aExact !== bExact) return bExact - aExact;
+
+    return 0;
+  });
+
+  return ranked[0] || null;
+}
+
+async function tryResolveDriveItemFromUserDrivePath(userIdOrUpn, relativePath) {
+  const u = String(userIdOrUpn || "").trim();
+  const p = String(relativePath || "").trim();
+
+  if (!u) throw new Error("user_drive_user_missing");
+  if (!p) throw new Error("user_drive_relative_path_missing");
+
+  return await graphFetch(`/users/${encodeURIComponent(u)}/drive/root:/${p}`);
 }
 
 function buildParticipantsPanel(members, me, lang) {
@@ -5046,6 +5336,118 @@ function resetCurrentBatchFolder() {
   _currentBatchFolderName = "";
 }
 
+function clearLastExportSummary() {
+  _lastExportSummary = null;
+}
+
+function beginFreshExportRun() {
+  _queueItems = [];
+  clearLastExportSummary();
+  resetCurrentBatchFolder();
+}
+
+function formatBytesHumanCompact(bytes) {
+  const n = Number(bytes || 0);
+  if (!Number.isFinite(n) || n <= 0) return "0 B";
+
+  const gb = 1024 * 1024 * 1024;
+  const mb = 1024 * 1024;
+
+  if (n >= gb) {
+    const value = n / gb;
+    return `${value % 1 === 0 ? value.toFixed(0) : value.toFixed(1)} GB`;
+  }
+
+  if (n >= mb) {
+    const value = n / mb;
+    return `${value % 1 === 0 ? value.toFixed(0) : value.toFixed(1)} MB`;
+  }
+
+  return formatBytesHuman(n);
+}
+
+function buildSkippedLargeFilesReportText(items, lang) {
+  const list = Array.isArray(items) ? items.filter(Boolean) : [];
+  if (!list.length) return "";
+
+  const limitLabel = formatBytesHumanCompact(LIMITS.MAX_ATTACH_BYTES_EACH);
+
+  const groups = new Map();
+
+  for (const item of list) {
+    const chatTitle =
+      String(item?.chatTitle || "").trim() ||
+      tFor(lang, "skippedLargeFilesReportUnknownChat");
+
+    if (!groups.has(chatTitle)) {
+      groups.set(chatTitle, []);
+    }
+
+    groups.get(chatTitle).push(item);
+  }
+
+  const lines = [];
+  lines.push(tFor(lang, "skippedLargeFilesReportTitle"));
+  lines.push("");
+  lines.push(
+    tFor(lang, "skippedLargeFilesReportIntro", {
+      limit: limitLabel,
+    })
+  );
+  lines.push("");
+
+  for (const [chatTitle, groupItems] of groups.entries()) {
+    lines.push(
+      tFor(lang, "skippedLargeFilesReportChat", {
+        title: chatTitle,
+      })
+    );
+
+    groupItems.forEach((item, idx) => {
+      lines.push(
+        tFor(lang, "skippedLargeFilesReportItem", {
+          index: idx + 1,
+          file: item?.fileName || tFor(lang, "attachmentFileFallback"),
+          size: formatBytesHumanCompact(item?.sizeBytes || 0),
+          sentAt:
+            String(item?.sentAtLabel || "").trim() ||
+            tFor(lang, "skippedLargeFilesReportUnknownSentAt"),
+        })
+      );
+    });
+
+    lines.push("");
+  }
+
+  return lines.join("\n").trim() + "\n";
+}
+
+function buildSkippedLargeFilesReportFileName(lang) {
+  const base = safeFileName(
+    tFor(lang, "skippedLargeFilesReportFileName") || "Skipped_large_files"
+  );
+  const ts = formatFileTimestampYYYYMMDDHHMMSS(new Date());
+  return `${base}_${ts}.txt`;
+}
+
+async function savePlainTextFile(fileName, text, totalQueuedCount = 1) {
+  if (!supportsFolderExport()) {
+    downloadTextFile(fileName, text, "text/plain;charset=utf-8");
+    return {
+      mode: "download",
+      folderName: "",
+    };
+  }
+
+  const targetDir = await ensureBatchFolderHandle(totalQueuedCount);
+  await writeTextFileToDirectory(targetDir, fileName, text, "text/plain;charset=utf-8");
+
+  return {
+    mode: "filesystem",
+    folderName: _currentBatchFolderName || "",
+  };
+}
+
 /** =========================
  * EXPORT PIPELINE
  * ========================= */
@@ -5080,18 +5482,19 @@ async function exportChatToOfflineHtml(chat, me, usedFileNames = null, totalQueu
     return String(a.id || "").localeCompare(String(b.id || ""));
   });
 
-  const stats = {
-    imagesEmbedded: 0,
-    imagesBytes: 0,
+    const stats = {
+      imagesEmbedded: 0,
+      imagesBytes: 0,
 
-    attachEmbedded: 0,
-    attachBytes: 0,
+      attachEmbedded: 0,
+      attachBytes: 0,
 
-    attachTotalCount: 0,
-    attachTotalBytes: 0,
+      attachTotalCount: 0,
+      attachTotalBytes: 0,
 
-    failures: [],
-  };
+      skippedLargeFiles: [],
+      failures: [],
+    };
 
   const fileTokenToMeta = new Map();
   const dtos = [];
@@ -5103,6 +5506,7 @@ async function exportChatToOfflineHtml(chat, me, usedFileNames = null, totalQueu
 
     const sender = extractSender(msg) || "Unknown";
     let bodyHtml = normalizeTeamsHtml(extractBodyHtml(msg));
+
     const isDeletedNotice = isDeletedMessage(msg, bodyHtml);
     const isSystemEvent = !isDeletedNotice && isSystemEventMessage(msg, bodyHtml);
     const isEmojiOnly = !isSystemEvent && !isDeletedNotice && isEmojiOnlyHtml(bodyHtml);
@@ -5144,7 +5548,16 @@ async function exportChatToOfflineHtml(chat, me, usedFileNames = null, totalQueu
     stats.attachTotalCount += fileAttachments.length;
     stats.attachTotalBytes += computeAttachmentsTotalSizeBytes(fileAttachments);
 
-    bodyHtml = tokenizeFileAttachments(bodyHtml, fileAttachments, fileTokenToMeta);
+        bodyHtml = tokenizeFileAttachments(
+          bodyHtml,
+          fileAttachments,
+          fileTokenToMeta,
+          {
+            chatTitle: exportTitle,
+            messageCreatedDateTime: msg.createdDateTime || "",
+            messageCreatedLabel: dtStr,
+          }
+        );
 
     dtos.push({
       kind: "message",
@@ -5204,6 +5617,7 @@ async function exportChatToOfflineHtml(chat, me, usedFileNames = null, totalQueu
   }
 
   const tokenToDataUrl = await embedFileAttachments(fileTokenToMeta, stats);
+
   for (const dto of dtos) {
     dto.bodyHtml = replaceFileTokensOffline(
       dto.bodyHtml,
@@ -5212,6 +5626,7 @@ async function exportChatToOfflineHtml(chat, me, usedFileNames = null, totalQueu
       stats,
       exportLang
     );
+
   }
 
   const archiveRange = getArchiveRange(dtos);
@@ -5308,6 +5723,8 @@ async function runExportQueue() {
     log(t("noQueuedChats"));
     return;
   }
+
+    const batchSkippedLargeFiles = [];
 
   _queueRunning = true;
   resetCurrentBatchFolder();
@@ -5406,6 +5823,10 @@ async function runExportQueue() {
         item.result = res;
         item.finishedAt = new Date().toISOString();
 
+        if (Array.isArray(res?.stats?.skippedLargeFiles) && res.stats.skippedLargeFiles.length) {
+          batchSkippedLargeFiles.push(...res.stats.skippedLargeFiles);
+        }
+
         appendLogLine(
           t("queueItemDone", {
             title: item.title,
@@ -5440,7 +5861,7 @@ async function runExportQueue() {
       await sleep(180);
     }
 
-    const qc = getQueueSummaryCounts();
+        const qc = getQueueSummaryCounts();
     appendLogLine(
       t("queueFinishedSummary", {
         done: qc.done,
@@ -5448,6 +5869,18 @@ async function runExportQueue() {
         total: _queueItems.length,
       })
     );
+
+    if (batchSkippedLargeFiles.length) {
+      const reportLang = getCurrentLanguage();
+      const reportText = buildSkippedLargeFilesReportText(batchSkippedLargeFiles, reportLang);
+      const reportFileName = buildSkippedLargeFilesReportFileName(reportLang);
+
+      await savePlainTextFile(reportFileName, reportText, queued.length);
+
+      appendLogLine(
+        `INFO: skipped large files report generated -> ${reportFileName} (${batchSkippedLargeFiles.length} item(s))`
+      );
+    }
   } finally {
     _queueRunning = false;
     resetCurrentBatchFolder();
@@ -5593,6 +6026,7 @@ async function onExportSelectedClick() {
   }
 
   markExportStartedForSession();
+  beginFreshExportRun();
 
   const info = buildQueueFromSelection();
   renderChats();
@@ -5618,6 +6052,7 @@ async function onQueueAllClick() {
   }
 
   markExportStartedForSession();
+  beginFreshExportRun();
 
   const info = buildQueueFromAllChats();
   renderChats();
@@ -5780,6 +6215,7 @@ async function doInit() {
         id: data.id,
         displayName: data.displayName,
         userPrincipalName: data.userPrincipalName,
+        mail: data.mail || "",
       };
 
       if (!_loginAtMs) recordAuthenticatedSession({ reset: true });

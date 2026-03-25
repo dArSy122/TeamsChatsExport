@@ -9,6 +9,7 @@ export const SUPPORTED_LANGUAGES = [
 const TRANSLATIONS = {
   bg: {
     appTitle: "Teams Chat Export Portal",
+    langTitle: "Език:",
     loginTag: "Microsoft Teams",
     loginTitle: "Teams Chat Export Portal",
     loginText: "Защитен вътрешен портал за експортиране на Microsoft Teams чатове в напълно офлайн HTML архиви.",
@@ -153,10 +154,19 @@ const TRANSLATIONS = {
     exportView: "Виж",
     exportDeletedMessage: "Това съобщение е изтрито",
     exportSystemEventFallback: "[Системно събитие]",
+
+    skippedLargeFilesReportFileName: "Propusnati_golemi_failove",
+    skippedLargeFilesReportTitle: "Пропуснати файлове заради прекалено голям размер",
+    skippedLargeFilesReportIntro: "Следните файлове не бяха вградени в архива, защото надвишават лимита от {limit}.",
+    skippedLargeFilesReportChat: 'Чат: "{title}"',
+    skippedLargeFilesReportItem: '{index}. "{file}" - {size}, изпратен на {sentAt}',
+    skippedLargeFilesReportUnknownChat: "Неизвестен чат",
+    skippedLargeFilesReportUnknownSentAt: "няма данни",
   },
 
   en: {
     appTitle: "Teams Chat Export Portal",
+    langTitle: "Language:",
     loginTag: "Microsoft Teams",
     loginTitle: "Teams Chat Export Portal",
     loginText: "Secure internal portal for exporting Microsoft Teams chats into fully offline HTML archives.",
@@ -301,10 +311,27 @@ const TRANSLATIONS = {
     exportView: "View",
     exportDeletedMessage: "This message has been deleted.",
     exportSystemEventFallback: "[System event]",
+
+    skippedLargeFilesReportFileName: "Skipped_large_files",
+    skippedLargeFilesReportTitle: "Skipped files due to excessive size",
+    skippedLargeFilesReportIntro: "The following files were not embedded in the archive because they exceed the {limit} limit.",
+    skippedLargeFilesReportChat: 'Chat: "{title}"',
+    skippedLargeFilesReportItem: '{index}. "{file}" - {size}, sent on {sentAt}',
+    skippedLargeFilesReportUnknownChat: "Unknown chat",
+    skippedLargeFilesReportUnknownSentAt: "unknown",
+
+    skippedLargeFilesReportFileName: "Fichiers_volumineux_ignores",
+    skippedLargeFilesReportTitle: "Fichiers ignorés en raison d’une taille excessive",
+    skippedLargeFilesReportIntro: "Les fichiers suivants n’ont pas été intégrés dans l’archive, car ils dépassent la limite de {limit}.",
+    skippedLargeFilesReportChat: 'Conversation : "{title}"',
+    skippedLargeFilesReportItem: '{index}. "{file}" - {size}, envoyé le {sentAt}',
+    skippedLargeFilesReportUnknownChat: "Conversation inconnue",
+    skippedLargeFilesReportUnknownSentAt: "inconnu",
   },
 
   fr: {
     appTitle: "Teams Chat Export Portal",
+    langTitle: "Langue:",
     loginTag: "Microsoft Teams",
     loginTitle: "Teams Chat Export Portal",
     loginText: "Portail interne sécurisé pour exporter les conversations Microsoft Teams dans des archives HTML entièrement hors ligne.",
