@@ -594,7 +594,7 @@ function renderExportSummary() {
     </div>
   `;
 }
-  }
+  
 
   host.innerHTML = `
   <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap;">
@@ -663,7 +663,7 @@ function renderExportSummary() {
 `;
 
   host.classList.remove("hidden");
-
+    }
 
 /** =========================
  * STATE
