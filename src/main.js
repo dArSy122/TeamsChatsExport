@@ -135,6 +135,7 @@ const ui = {
   q: null,
   chatList: null,
   queueStatus: null,
+  exportSummaryHost: null,
 
   langSelect: null,
 };
@@ -156,6 +157,7 @@ function refreshUiRefs() {
   ui.q = $("q");
   ui.chatList = $("chatList");
   ui.queueStatus = $("queueStatus");
+  ui.exportSummaryHost = $("exportSummaryHost");
 
   ui.langSelect = $("langSelect");
 }
@@ -179,6 +181,7 @@ function applyLanguageToUi() {
   ensureExtraButtons();
   setCounts();
   renderChats();
+  renderExportSummary();
 }
 
 function populateLanguageSelector() {
@@ -271,6 +274,397 @@ function ensureExtraButtons() {
   }
 }
 
+function ensureExportSummaryHost() {
+  if (ui.exportSummaryHost) return ui.exportSummaryHost;
+
+  const appView = ui.appView || $("appView");
+  const chatList = ui.chatList || $("chatList");
+  const queueStatus = ui.queueStatus || $("queueStatus");
+
+  if (!appView) return null;
+
+  const host = document.createElement("section");
+  host.id = "exportSummaryHost";
+  host.className = "exportSummaryHost hidden";
+  host.style.margin = "14px 0";
+  host.style.padding = "14px";
+  host.style.border = "1px solid rgba(255,255,255,.10)";
+  host.style.borderRadius = "16px";
+  host.style.background = "rgba(255,255,255,.03)";
+  host.style.boxShadow = "0 12px 30px rgba(0,0,0,.14)";
+
+  if (chatList?.parentElement) {
+    chatList.parentElement.insertBefore(host, chatList);
+  } else if (queueStatus?.parentElement) {
+    queueStatus.parentElement.insertAdjacentElement("afterend", host);
+  } else {
+    appView.appendChild(host);
+  }
+
+  ui.exportSummaryHost = host;
+  return host;
+}
+
+async function askMaxSingleFileSizeMb(defaultMb = 600) {
+  return new Promise((resolve) => {
+    const lang = getCurrentLanguage();
+
+    const backdrop = document.createElement("div");
+    backdrop.style.position = "fixed";
+    backdrop.style.inset = "0";
+    backdrop.style.background = "rgba(0,0,0,.55)";
+    backdrop.style.display = "flex";
+    backdrop.style.alignItems = "center";
+    backdrop.style.justifyContent = "center";
+    backdrop.style.zIndex = "999999";
+
+    const modal = document.createElement("div");
+    modal.style.width = "min(520px, calc(100vw - 32px))";
+    modal.style.border = "1px solid rgba(255,255,255,.10)";
+    modal.style.borderRadius = "18px";
+    modal.style.background = "rgba(15,23,42,.98)";
+    modal.style.boxShadow = "0 24px 60px rgba(0,0,0,.40)";
+    modal.style.padding = "18px";
+
+    const title = document.createElement("div");
+    title.textContent = t("maxFileSizeDialogTitle");
+    title.style.fontSize = "18px";
+    title.style.fontWeight = "1000";
+    title.style.lineHeight = "1.2";
+
+    const text = document.createElement("div");
+    text.textContent = t("maxFileSizeDialogText");
+    text.style.marginTop = "10px";
+    text.style.color = "rgba(255,255,255,.76)";
+    text.style.fontSize = "13px";
+    text.style.lineHeight = "1.5";
+
+    const label = document.createElement("label");
+    label.textContent = t("maxFileSizeDialogLabel");
+    label.style.display = "block";
+    label.style.marginTop = "14px";
+    label.style.marginBottom = "8px";
+    label.style.fontSize = "12px";
+    label.style.fontWeight = "900";
+    label.style.color = "rgba(255,255,255,.84)";
+
+    const input = document.createElement("input");
+    input.type = "text";
+    input.inputMode = "decimal";
+    input.placeholder = t("maxFileSizeDialogPlaceholder");
+    input.style.width = "100%";
+    input.style.padding = "11px 12px";
+    input.style.borderRadius = "12px";
+    input.style.border = "1px solid rgba(255,255,255,.10)";
+    input.style.background = "rgba(255,255,255,.04)";
+    input.style.color = "#fff";
+    input.style.fontSize = "14px";
+    input.style.outline = "none";
+
+    const hint = document.createElement("div");
+    hint.style.marginTop = "8px";
+    hint.style.fontSize = "12px";
+    hint.style.color = "rgba(255,255,255,.58)";
+    hint.textContent = `Default: ${defaultMb} MB`;
+
+    const error = document.createElement("div");
+    error.style.marginTop = "8px";
+    error.style.fontSize = "12px";
+    error.style.fontWeight = "900";
+    error.style.color = "#fca5a5";
+    error.style.display = "none";
+
+    const actions = document.createElement("div");
+    actions.style.display = "flex";
+    actions.style.justifyContent = "flex-end";
+    actions.style.gap = "10px";
+    actions.style.marginTop = "16px";
+
+    const btnCancel = document.createElement("button");
+    btnCancel.type = "button";
+    btnCancel.textContent = t("maxFileSizeDialogCancel");
+    btnCancel.style.padding = "9px 14px";
+    btnCancel.style.borderRadius = "12px";
+    btnCancel.style.border = "1px solid rgba(255,255,255,.10)";
+    btnCancel.style.background = "rgba(255,255,255,.04)";
+    btnCancel.style.color = "#fff";
+    btnCancel.style.fontWeight = "1000";
+    btnCancel.style.cursor = "pointer";
+
+    const btnOk = document.createElement("button");
+    btnOk.type = "button";
+    btnOk.textContent = t("maxFileSizeDialogOk");
+    btnOk.style.padding = "9px 14px";
+    btnOk.style.borderRadius = "12px";
+    btnOk.style.border = "1px solid rgba(255,255,255,.10)";
+    btnOk.style.background = "rgba(37,99,235,.20)";
+    btnOk.style.color = "#fff";
+    btnOk.style.fontWeight = "1000";
+    btnOk.style.cursor = "pointer";
+
+    actions.appendChild(btnCancel);
+    actions.appendChild(btnOk);
+
+    modal.appendChild(title);
+    modal.appendChild(text);
+    modal.appendChild(label);
+    modal.appendChild(input);
+    modal.appendChild(hint);
+    modal.appendChild(error);
+    modal.appendChild(actions);
+
+    backdrop.appendChild(modal);
+    document.body.appendChild(backdrop);
+
+    const cleanup = () => {
+      backdrop.remove();
+    };
+
+    const submit = () => {
+      const raw = String(input.value || "").trim().replace(",", ".");
+
+      if (!raw) {
+        cleanup();
+        resolve({
+          cancelled: false,
+          maxMb: defaultMb,
+        });
+        return;
+      }
+
+      const parsed = Number(raw);
+      if (!Number.isFinite(parsed) || parsed <= 0) {
+        error.textContent = t("maxFileSizeDialogInvalid");
+        error.style.display = "block";
+        input.focus();
+        input.select();
+        return;
+      }
+
+      cleanup();
+      resolve({
+        cancelled: false,
+        maxMb: parsed,
+      });
+    };
+
+    const cancel = () => {
+      cleanup();
+      resolve({
+        cancelled: true,
+        maxMb: null,
+      });
+    };
+
+    btnOk.addEventListener("click", submit);
+    btnCancel.addEventListener("click", cancel);
+
+    backdrop.addEventListener("click", (ev) => {
+      if (ev.target === backdrop) {
+        cancel();
+      }
+    });
+
+    input.addEventListener("keydown", (ev) => {
+      if (ev.key === "Enter") {
+        ev.preventDefault();
+        submit();
+      } else if (ev.key === "Escape") {
+        ev.preventDefault();
+        cancel();
+      }
+    });
+
+    setTimeout(() => {
+      input.focus();
+      input.select();
+    }, 0);
+  });
+}
+
+function renderExportSummary() {
+  const host = ensureExportSummaryHost();
+  if (!host) return;
+
+  if (!_lastExportSummary) {
+    host.innerHTML = "";
+    host.classList.add("hidden");
+    return;
+  }
+
+  const s = _lastExportSummary;
+  const rows = Array.isArray(s.rows) ? s.rows : [];
+
+  const statusChip = (status) => {
+    const label = getQueueStatusLabel(status);
+    let bg = "rgba(255,255,255,.06)";
+
+    if (status === "done") bg = "rgba(34,197,94,.16)";
+    else if (status === "failed") bg = "rgba(239,68,68,.16)";
+    else if (status === "running") bg = "rgba(37,99,235,.16)";
+    else if (status === "queued") bg = "rgba(255,255,255,.08)";
+
+    return `<span style="
+      display:inline-flex;
+      align-items:center;
+      padding:4px 9px;
+      border-radius:999px;
+      font-size:11px;
+      font-weight:1000;
+      background:${bg};
+      border:1px solid rgba(255,255,255,.08);
+      white-space:nowrap;
+    ">${esc(label)}</span>`;
+  };
+
+  const metricCard = (label, value) => `
+    <div style="
+      border:1px solid rgba(255,255,255,.08);
+      background:rgba(255,255,255,.025);
+      border-radius:14px;
+      padding:12px 13px;
+      min-width:160px;
+    ">
+      <div style="
+        color:rgba(255,255,255,.68);
+        font-size:12px;
+        font-weight:900;
+        line-height:1.3;
+      ">${esc(label)}</div>
+      <div style="
+        margin-top:6px;
+        font-size:18px;
+        font-weight:1000;
+        line-height:1.2;
+      ">${esc(value)}</div>
+    </div>
+  `;
+
+  let rowsHtml = "";
+  for (const row of rows) {
+  rowsHtml += `
+    <div style="
+      display:grid;
+      grid-template-columns:minmax(220px, 2fr) auto repeat(6, minmax(90px, 1fr));
+      gap:10px;
+      align-items:start;
+      padding:10px 12px;
+      border-top:1px solid rgba(255,255,255,.07);
+    ">
+      <div style="min-width:0;">
+        <div style="
+          font-size:13px;
+          font-weight:1000;
+          line-height:1.3;
+          word-break:break-word;
+        ">${esc(row.title || "Chat")}</div>
+      </div>
+
+      <div>${statusChip(row.status)}</div>
+
+      <div>
+        <div style="color:rgba(255,255,255,.62);font-size:11px;font-weight:900;">${esc(t("exportSummaryItems"))}</div>
+        <div style="margin-top:4px;font-size:13px;font-weight:1000;">${esc(String(row.items || 0))}</div>
+      </div>
+
+      <div>
+        <div style="color:rgba(255,255,255,.62);font-size:11px;font-weight:900;">${esc(t("exportSummaryFiles"))}</div>
+        <div style="margin-top:4px;font-size:13px;font-weight:1000;">${esc(String(row.embeddedFiles || 0))}</div>
+      </div>
+
+      <div>
+        <div style="color:rgba(255,255,255,.62);font-size:11px;font-weight:900;">${esc(t("exportSummaryFilesSize"))}</div>
+        <div style="margin-top:4px;font-size:13px;font-weight:1000;">${esc(formatBytesHuman(row.embeddedFilesBytes || 0))}</div>
+      </div>
+
+      <div>
+        <div style="color:rgba(255,255,255,.62);font-size:11px;font-weight:900;">${esc(t("exportSummaryImages"))}</div>
+        <div style="margin-top:4px;font-size:13px;font-weight:1000;">${esc(String(row.embeddedImages || 0))}</div>
+      </div>
+
+      <div>
+        <div style="color:rgba(255,255,255,.62);font-size:11px;font-weight:900;">${esc(t("exportSummarySkipped"))}</div>
+        <div style="margin-top:4px;font-size:13px;font-weight:1000;">${esc(String(row.skippedLargeFiles || 0))}</div>
+      </div>
+
+      <div>
+        <div style="color:rgba(255,255,255,.62);font-size:11px;font-weight:900;">${esc(t("exportSummarySkippedSize"))}</div>
+        <div style="margin-top:4px;font-size:13px;font-weight:1000;">${esc(formatBytesHuman(row.skippedLargeFilesBytes || 0))}</div>
+      </div>
+    </div>
+  `;
+}
+  }
+
+  host.innerHTML = `
+  <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap;">
+    <div>
+      <div style="font-size:18px;font-weight:1000;line-height:1.2;">${esc(t("exportSummaryTitle"))}</div>
+      <div style="margin-top:6px;color:rgba(255,255,255,.68);font-size:12px;line-height:1.45;">
+        ${esc(t("exportSummarySubtitle"))}
+      </div>
+    </div>
+    ${
+      s.batchFolderName
+        ? `<div style="
+            color:rgba(255,255,255,.72);
+            font-size:12px;
+            font-weight:900;
+            padding:6px 10px;
+            border-radius:999px;
+            border:1px solid rgba(255,255,255,.08);
+            background:rgba(255,255,255,.03);
+          ">${esc(t("exportSummaryBatchFolder"))}: ${esc(s.batchFolderName)}</div>`
+        : ``
+    }
+  </div>
+
+  <div style="
+    margin-top:14px;
+    display:grid;
+    grid-template-columns:repeat(auto-fit, minmax(170px, 1fr));
+    gap:10px;
+  ">
+    ${metricCard(t("exportSummaryTotalChats"), String(s.totalChats || 0))}
+    ${metricCard(t("exportSummaryDone"), String(s.done || 0))}
+    ${metricCard(t("exportSummaryFailed"), String(s.failed || 0))}
+    ${metricCard(t("exportSummaryExportedItems"), String(s.exportedItems || 0))}
+    ${metricCard(t("exportSummaryEmbeddedFiles"), String(s.embeddedFiles || 0))}
+    ${metricCard(t("exportSummaryEmbeddedFilesSize"), formatBytesHuman(s.embeddedFilesBytes || 0))}
+    ${metricCard(t("exportSummaryEmbeddedImages"), String(s.embeddedImages || 0))}
+    ${metricCard(t("exportSummaryEmbeddedImagesSize"), formatBytesHuman(s.embeddedImagesBytes || 0))}
+    ${metricCard(t("exportSummarySkippedFiles"), String(s.skippedLargeFilesCount || 0))}
+    ${metricCard(t("exportSummarySkippedFilesSize"), formatBytesHuman(s.skippedLargeFilesBytes || 0))}
+  </div>
+
+  <div style="
+    margin-top:16px;
+    border:1px solid rgba(255,255,255,.08);
+    border-radius:14px;
+    overflow:hidden;
+    background:rgba(255,255,255,.02);
+  ">
+    <div style="
+      padding:10px 12px;
+      font-size:13px;
+      font-weight:1000;
+      border-bottom:1px solid rgba(255,255,255,.07);
+      background:rgba(255,255,255,.03);
+    ">${esc(t("exportSummaryPerChat"))}</div>
+
+    ${rows.length ? rowsHtml : `
+      <div style="
+        padding:12px;
+        color:rgba(255,255,255,.68);
+        font-size:13px;
+      ">${esc(t("exportSummaryNoRows"))}</div>
+    `}
+  </div>
+`;
+
+  host.classList.remove("hidden");
+
+
 /** =========================
  * STATE
  * ========================= */
@@ -281,6 +675,7 @@ let _selectedChatIds = new Set();
 let _queueItems = [];
 let _queueRunning = false;
 let _lastExportSummary = null;
+let _currentMaxAttachBytesEach = LIMITS.MAX_ATTACH_BYTES_EACH;
 
 let _loginAtMs = 0;
 let _exportStartedSinceLogin = false;
@@ -507,6 +902,115 @@ function formatBytesHuman(bytes) {
   if (n >= mb) return `${(n / mb).toFixed(2)} MB`;
   if (n >= kb) return `${(n / kb).toFixed(2)} KB`;
   return `${n} B`;
+}
+function mbToBytes(mb) {
+  const n = Number(mb || 0);
+  if (!Number.isFinite(n) || n <= 0) return 0;
+  return Math.floor(n * 1024 * 1024);
+}
+
+function buildExportSummaryFromQueue(batchFolderName = "") {
+  const items = Array.isArray(_queueItems) ? _queueItems : [];
+
+  let totalChats = items.length;
+  let done = 0;
+  let failed = 0;
+
+  let embeddedFiles = 0;
+  let embeddedFilesBytes = 0;
+
+  let embeddedImages = 0;
+  let embeddedImagesBytes = 0;
+
+  let skippedLargeFilesCount = 0;
+  let skippedLargeFilesBytes = 0;
+
+  let exportedItems = 0;
+
+  const rows = [];
+
+  for (const q of items) {
+    const status = q?.status || "queued";
+
+    if (status === "done") done++;
+    if (status === "failed") failed++;
+
+    const res = q?.result || {};
+    const stats = res?.stats || {};
+
+    const chatTitle =
+      q?.title ||
+      q?.topic ||
+      res?.chatTitle ||
+      "Chat";
+
+    const rowItems = Number(res?.items || 0);
+    const rowEmbeddedFiles = Number(stats.attachEmbedded || 0);
+    const rowEmbeddedFilesBytes = Number(stats.attachBytes || 0);
+
+    const rowEmbeddedImages = Number(stats.imagesEmbedded || 0);
+    const rowEmbeddedImagesBytes = Number(stats.imagesBytes || 0);
+
+    const skipped = Array.isArray(stats.skippedLargeFiles)
+      ? stats.skippedLargeFiles
+      : [];
+
+    let rowSkippedCount = skipped.length;
+    let rowSkippedBytes = 0;
+
+    for (const s of skipped) {
+      rowSkippedBytes += Number(s?.sizeBytes || 0);
+    }
+
+    exportedItems += rowItems;
+
+    embeddedFiles += rowEmbeddedFiles;
+    embeddedFilesBytes += rowEmbeddedFilesBytes;
+
+    embeddedImages += rowEmbeddedImages;
+    embeddedImagesBytes += rowEmbeddedImagesBytes;
+
+    skippedLargeFilesCount += rowSkippedCount;
+    skippedLargeFilesBytes += rowSkippedBytes;
+
+    rows.push({
+      title: chatTitle,
+      status,
+      items: rowItems,
+
+      embeddedFiles: rowEmbeddedFiles,
+      embeddedFilesBytes: rowEmbeddedFilesBytes,
+
+      embeddedImages: rowEmbeddedImages,
+      embeddedImagesBytes: rowEmbeddedImagesBytes,
+
+      skippedLargeFiles: rowSkippedCount,
+      skippedLargeFilesBytes: rowSkippedBytes,
+
+      error: q?.errorHuman || q?.error || "",
+      errorStage: q?.errorStage || "",
+      errorCode: q?.errorCode || "",
+    });
+  }
+
+  return {
+    totalChats,
+    done,
+    failed,
+    exportedItems,
+
+    embeddedFiles,
+    embeddedFilesBytes,
+
+    embeddedImages,
+    embeddedImagesBytes,
+
+    skippedLargeFilesCount,
+    skippedLargeFilesBytes,
+
+    batchFolderName: String(batchFolderName || "").trim(),
+    rows,
+  };
 }
 
 function base64ToBlob(base64, mime = "application/octet-stream") {
@@ -3098,7 +3602,9 @@ async function embedFileAttachments(fileTokenToMeta, stats) {
         throw new Error("blob_empty");
       }
 
-      if (fileSize > LIMITS.MAX_ATTACH_BYTES_EACH) {
+      const activeMaxAttachBytesEach = _currentMaxAttachBytesEach || LIMITS.MAX_ATTACH_BYTES_EACH;
+
+      if (fileSize > activeMaxAttachBytesEach) {
         if (!Array.isArray(stats.skippedLargeFiles)) {
           stats.skippedLargeFiles = [];
         }
@@ -5344,6 +5850,8 @@ function beginFreshExportRun() {
   _queueItems = [];
   clearLastExportSummary();
   resetCurrentBatchFolder();
+  _currentMaxAttachBytesEach = LIMITS.MAX_ATTACH_BYTES_EACH;
+  renderExportSummary();
 }
 
 function formatBytesHumanCompact(bytes) {
@@ -5370,7 +5878,8 @@ function buildSkippedLargeFilesReportText(items, lang) {
   const list = Array.isArray(items) ? items.filter(Boolean) : [];
   if (!list.length) return "";
 
-  const limitLabel = formatBytesHumanCompact(LIMITS.MAX_ATTACH_BYTES_EACH);
+  const activeMaxAttachBytesEach = _currentMaxAttachBytesEach || LIMITS.MAX_ATTACH_BYTES_EACH;
+  const limitLabel = formatBytesHumanCompact(activeMaxAttachBytesEach);
 
   const groups = new Map();
 
@@ -5724,7 +6233,8 @@ async function runExportQueue() {
     return;
   }
 
-    const batchSkippedLargeFiles = [];
+  const batchSkippedLargeFiles = [];
+  let summaryBatchFolderName = "";
 
   _queueRunning = true;
   resetCurrentBatchFolder();
@@ -5734,15 +6244,31 @@ async function runExportQueue() {
 
   appendLogLine(t("queueStart", { count: queued.length }));
 
-  if (supportsFolderExport()) {
+      if (supportsFolderExport()) {
     try {
       await ensureBatchFolderHandle(queued.length);
+      summaryBatchFolderName = _currentBatchFolderName || "";
 
       if (queued.length > 1 && _currentBatchFolderName) {
         appendLogLine(t("exportFolderSubfolder", { folder: _currentBatchFolderName }));
       } else {
         appendLogLine(t("exportFolderSelected"));
       }
+
+      const chosen = await askMaxSingleFileSizeMb(600);
+      if (chosen?.cancelled) {
+        _queueRunning = false;
+        resetCurrentBatchFolder();
+        removeQueuedItemsThatNeverStarted();
+        renderChats();
+        setCounts();
+        setBusy(false);
+        appendLogLine(t("maxFileSizeDialogCancelled"));
+        return;
+      }
+
+      _currentMaxAttachBytesEach = mbToBytes(chosen?.maxMb || 600) || LIMITS.MAX_ATTACH_BYTES_EACH;
+      appendLogLine(`INFO: max single file size for this export run -> ${chosen?.maxMb || 600} MB`);
     } catch (e) {
       _queueRunning = false;
       resetCurrentBatchFolder();
@@ -5767,8 +6293,23 @@ async function runExportQueue() {
       return;
     }
   } else {
-        appendLogLine(t("fsApiFallback"));
-        appendLogLine(t("allowMultipleDownloads"));
+    appendLogLine(t("fsApiFallback"));
+    appendLogLine(t("allowMultipleDownloads"));
+
+    const chosen = await askMaxSingleFileSizeMb(600);
+    if (chosen?.cancelled) {
+      _queueRunning = false;
+      resetCurrentBatchFolder();
+      removeQueuedItemsThatNeverStarted();
+      renderChats();
+      setCounts();
+      setBusy(false);
+      appendLogLine(t("maxFileSizeDialogCancelled"));
+      return;
+    }
+
+    _currentMaxAttachBytesEach = mbToBytes(chosen?.maxMb || 600) || LIMITS.MAX_ATTACH_BYTES_EACH;
+    appendLogLine(`INFO: max single file size for this export run -> ${chosen?.maxMb || 600} MB`);
   }
 
   const usedFileNames = new Set(
@@ -5881,6 +6422,9 @@ async function runExportQueue() {
         `INFO: skipped large files report generated -> ${reportFileName} (${batchSkippedLargeFiles.length} item(s))`
       );
     }
+
+    _lastExportSummary = buildExportSummaryFromQueue(summaryBatchFolderName);
+    renderExportSummary();
   } finally {
     _queueRunning = false;
     resetCurrentBatchFolder();
@@ -6201,6 +6745,9 @@ async function doInit() {
   bindUiEvents();
   applyLanguageToUi();
   showLoginView();
+
+  ensureExportSummaryHost();
+  renderExportSummary();
 
   try {
     setBusy(true);

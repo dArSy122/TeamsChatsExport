@@ -162,6 +162,40 @@ const TRANSLATIONS = {
     skippedLargeFilesReportItem: '{index}. "{file}" - {size}, изпратен на {sentAt}',
     skippedLargeFilesReportUnknownChat: "Неизвестен чат",
     skippedLargeFilesReportUnknownSentAt: "няма данни",
+
+    exportSummaryTitle: "Обобщение на експорта",
+    exportSummarySubtitle: "Обобщение за последната завършена експорт сесия",
+
+    exportSummaryTotalChats: "Общо чатове",
+    exportSummaryDone: "Готови",
+    exportSummaryFailed: "Грешки",
+    exportSummaryExportedItems: "Елементи",
+    exportSummaryEmbeddedFiles: "Вградени файлове",
+    exportSummaryEmbeddedFilesSize: "Размер файлове",
+    exportSummaryEmbeddedImages: "Вградени изображения",
+    exportSummaryEmbeddedImagesSize: "Размер изображения",
+    exportSummarySkippedFiles: "Пропуснати (големи)",
+    exportSummarySkippedFilesSize: "Размер пропуснати",
+    exportSummaryBatchFolder: "Папка",
+
+    exportSummaryPerChat: "Разбивка по чатове",
+    exportSummaryNoRows: "Няма налични данни",
+
+    exportSummaryItems: "Елементи",
+    exportSummaryFiles: "Файлове",
+    exportSummaryFilesSize: "Размер файлове",
+    exportSummaryImages: "Изображения",
+    exportSummarySkipped: "Пропуснати",
+    exportSummarySkippedSize: "Размер пропуснати",
+
+    maxFileSizeDialogTitle: "Максимален размер на единичен файл",
+      maxFileSizeDialogText: "Какъв да бъде максималният размер на един файл за вграждане в архива? Остави празно, за да се използва 600 MB по подразбиране.",
+      maxFileSizeDialogLabel: "Максимален размер (MB)",
+      maxFileSizeDialogPlaceholder: "Например: 600",
+      maxFileSizeDialogOk: "OK",
+      maxFileSizeDialogCancel: "Отказ",
+      maxFileSizeDialogInvalid: "Моля, въведи валидно положително число в MB.",
+      maxFileSizeDialogCancelled: "Експортът е прекратен от потребителя при избора на максимален размер на файл.",
   },
 
   en: {
@@ -320,13 +354,39 @@ const TRANSLATIONS = {
     skippedLargeFilesReportUnknownChat: "Unknown chat",
     skippedLargeFilesReportUnknownSentAt: "unknown",
 
-    skippedLargeFilesReportFileName: "Fichiers_volumineux_ignores",
-    skippedLargeFilesReportTitle: "Fichiers ignorés en raison d’une taille excessive",
-    skippedLargeFilesReportIntro: "Les fichiers suivants n’ont pas été intégrés dans l’archive, car ils dépassent la limite de {limit}.",
-    skippedLargeFilesReportChat: 'Conversation : "{title}"',
-    skippedLargeFilesReportItem: '{index}. "{file}" - {size}, envoyé le {sentAt}',
-    skippedLargeFilesReportUnknownChat: "Conversation inconnue",
-    skippedLargeFilesReportUnknownSentAt: "inconnu",
+    exportSummaryTitle: "Export Summary",
+    exportSummarySubtitle: "Summary for the most recent completed export session",
+
+    exportSummaryTotalChats: "Total chats",
+    exportSummaryDone: "Done",
+    exportSummaryFailed: "Failed",
+    exportSummaryExportedItems: "Items",
+    exportSummaryEmbeddedFiles: "Embedded files",
+    exportSummaryEmbeddedFilesSize: "Files size",
+    exportSummaryEmbeddedImages: "Embedded images",
+    exportSummaryEmbeddedImagesSize: "Images size",
+    exportSummarySkippedFiles: "Skipped (large)",
+    exportSummarySkippedFilesSize: "Skipped size",
+    exportSummaryBatchFolder: "Batch folder",
+
+    exportSummaryPerChat: "Per-chat breakdown",
+    exportSummaryNoRows: "No export rows available",
+
+    exportSummaryItems: "Items",
+    exportSummaryFiles: "Files",
+    exportSummaryFilesSize: "Files size",
+    exportSummaryImages: "Images",
+    exportSummarySkipped: "Skipped",
+    exportSummarySkippedSize: "Skipped size",
+
+    maxFileSizeDialogTitle: "Maximum single file size",
+    maxFileSizeDialogText: "What should be the maximum size of a single file to embed in the archive? Leave empty to use the default 600 MB.",
+    maxFileSizeDialogLabel: "Maximum size (MB)",
+    maxFileSizeDialogPlaceholder: "For example: 600",
+    maxFileSizeDialogOk: "OK",
+    maxFileSizeDialogCancel: "Cancel",
+    maxFileSizeDialogInvalid: "Please enter a valid positive number in MB.",
+    maxFileSizeDialogCancelled: "Export was cancelled by the user while choosing the maximum file size.",
   },
 
   fr: {
@@ -476,6 +536,50 @@ const TRANSLATIONS = {
     exportView: "Voir",
     exportDeletedMessage: "Ce message a été supprimé.",
     exportSystemEventFallback: "[Événement système]",
+
+    
+
+    skippedLargeFilesReportFileName: "Fichiers_volumineux_ignores",
+    skippedLargeFilesReportTitle: "Fichiers ignorés en raison d’une taille excessive",
+    skippedLargeFilesReportIntro: "Les fichiers suivants n’ont pas été intégrés dans l’archive, car ils dépassent la limite de {limit}.",
+    skippedLargeFilesReportChat: 'Conversation : "{title}"',
+    skippedLargeFilesReportItem: '{index}. "{file}" - {size}, envoyé le {sentAt}',
+    skippedLargeFilesReportUnknownChat: "Conversation inconnue",
+    skippedLargeFilesReportUnknownSentAt: "inconnu",
+
+    exportSummaryTitle: "Résumé de l’export",
+    exportSummarySubtitle: "Résumé de la dernière session d’export terminée",
+
+    exportSummaryTotalChats: "Conversations",
+    exportSummaryDone: "Terminées",
+    exportSummaryFailed: "Échecs",
+    exportSummaryExportedItems: "Éléments",
+    exportSummaryEmbeddedFiles: "Fichiers intégrés",
+    exportSummaryEmbeddedFilesSize: "Taille fichiers",
+    exportSummaryEmbeddedImages: "Images intégrées",
+    exportSummaryEmbeddedImagesSize: "Taille images",
+    exportSummarySkippedFiles: "Ignorés (gros)",
+    exportSummarySkippedFilesSize: "Taille ignorés",
+    exportSummaryBatchFolder: "Dossier",
+
+    exportSummaryPerChat: "Détail par conversation",
+    exportSummaryNoRows: "Aucune donnée disponible",
+
+    exportSummaryItems: "Éléments",
+    exportSummaryFiles: "Fichiers",
+    exportSummaryFilesSize: "Taille fichiers",
+    exportSummaryImages: "Images",
+    exportSummarySkipped: "Ignorés",
+    exportSummarySkippedSize: "Taille ignorés",
+
+    maxFileSizeDialogTitle: "Taille maximale d’un fichier",
+    maxFileSizeDialogText: "Quelle doit être la taille maximale d’un seul fichier à intégrer dans l’archive ? Laissez vide pour utiliser la valeur par défaut de 600 MB.",
+    maxFileSizeDialogLabel: "Taille maximale (MB)",
+    maxFileSizeDialogPlaceholder: "Par exemple : 600",
+    maxFileSizeDialogOk: "OK",
+    maxFileSizeDialogCancel: "Annuler",
+    maxFileSizeDialogInvalid: "Veuillez saisir un nombre positif valide en MB.",
+    maxFileSizeDialogCancelled: "L’export a été annulé par l’utilisateur lors du choix de la taille maximale du fichier.",
   },
 };
 
