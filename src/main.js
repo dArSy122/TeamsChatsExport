@@ -3898,6 +3898,20 @@ async function getDriveItemFromSharingUrl(sharingUrl) {
     const shareId = toShareIdFromUrl(url);
     return await graphFetch(`/shares/${encodeURIComponent(shareId)}/driveItem`);
   } catch (shareErr) {
+    const shareMsg = normalizeErrorMessage(shareErr).toLowerCase();
+
+    // CRITICAL:
+    // If Graph explicitly says 403/accessDenied on the share link,
+    // do NOT continue with me/user/site fallbacks.
+    // This is treated as "file not downloadable for this export run".
+    if (
+      shareMsg.includes("403") ||
+      shareMsg.includes("accessdenied") ||
+      shareMsg.includes("access denied")
+    ) {
+      throw new Error("share_access_denied_or_expired");
+    }
+
     const personalInfo = parsePersonalSharePointUrl(url);
 
     if (!personalInfo) {
@@ -6049,7 +6063,26 @@ async function exportChatToOfflineHtml(chat, me, usedFileNames = null, totalQueu
     }
 
     let forwardedAttachments = extractForwardedAttachmentData(msg.attachments || [], members, me);
-    forwardedAttachments = await enrichForwardedAuthors(forwardedAttachments, members, me, stats);
+
+try {
+  forwardedAttachments = await enrichForwardedAuthors(
+    forwardedAttachments,
+    members,
+    me,
+    stats
+  );
+} catch (e) {
+  stats.failures.push({
+    kind: "forwardedAttachmentEnrichment",
+    stage: "enrichForwardedAuthors",
+    messageId: msg.id,
+    error: normalizeErrorMessage(e),
+  });
+
+  forwardedAttachments = Array.isArray(forwardedAttachments)
+    ? forwardedAttachments
+    : [];
+}
 
     const { quotes: quotesFromAttachments, fileAttachments } =
       splitQuotesFromAttachments(msg.attachments || []);
@@ -6125,7 +6158,19 @@ async function exportChatToOfflineHtml(chat, me, usedFileNames = null, totalQueu
     dto.forwardHtml = renderForwardBlock(forwarded, exportLang);
   }
 
-  const tokenToDataUrl = await embedFileAttachments(fileTokenToMeta, stats);
+  let tokenToDataUrl = new Map();
+
+try {
+  tokenToDataUrl = await embedFileAttachments(fileTokenToMeta, stats);
+} catch (e) {
+  stats.failures.push({
+    kind: "attachmentEmbedding",
+    stage: "embedFileAttachments",
+    error: normalizeErrorMessage(e),
+  });
+
+  tokenToDataUrl = new Map();
+}
 
   for (const dto of dtos) {
     dto.bodyHtml = replaceFileTokensOffline(
